@@ -158,6 +158,20 @@ async function readJsonSafe<T = any>(req: Request): Promise<T> {
   return req.json() as Promise<T>;
 }
 
+import type { RequestInitCfProperties } from '@cloudflare/workers-types';
+
+async function fetchCached(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const r = await fetch(url, {
+      cf: { cacheTtl: 86400, cacheEverything: true } as RequestInitCfProperties,
+    } as RequestInit);
+    if (!r.ok) return null;
+    return await r.arrayBuffer();
+  } catch {
+    return null;
+  }
+}
+
 // Holt eine externe URL, cached sie im Edge und liefert den Body.
 async function fetchCached(url: string): Promise<ArrayBuffer | null> {
   try {
@@ -184,25 +198,33 @@ export default {
     }
 
     /* -------- /vendor : liefert UMD aus eigener Origin -------- */
-    if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
-      const sources = [
-        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-      ];
-      for (const s of sources) {
-        const body = await fetchCached(s);
-        if (body) {
-          return new Response(body, {
-            status: 200,
-            headers: corsHeaders(origin, 'application/javascript', {
-              'Cache-Control': 'public, max-age=86400',
-              'X-Vendor-Source': s,
-            }),
-          });
-        }
-      }
-      return text('vendor fetch failed', origin, 502);
+    // -------- /vendor/mpl-token-metadata-umd.js --------
+if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
+  const allow = parseList(env.ALLOWED_ORIGINS) || [];
+  const origin = pickOrigin(req, allow);
+
+  const sources = [
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+  ];
+
+  for (const s of sources) {
+    const body = await fetchCached(s);
+    if (body) {
+      return new Response(body, {
+        status: 200,
+        headers: corsHeaders(origin, 'application/javascript', {
+          'Cache-Control': 'public, max-age=86400',
+          'X-Vendor-Source': s,
+        }),
+      });
     }
+  }
+  return new Response('vendor fetch failed', {
+    status: 502,
+    headers: corsHeaders(origin, 'text/plain'),
+  });
+}
 
     /* -------- Health / Info -------- */
     if (url.pathname === '/' || url.pathname === '/health') {
@@ -383,4 +405,5 @@ export default {
     // 404
     return text('Not found', origin, 404);
   }
+  
 };
