@@ -1,19 +1,23 @@
-# wrangler.toml
-name = "inpi-proxy-nft"
-main = "src/index.ts"
-compatibility_date = "2025-08-19"
+{
+  "name": "inpinity-rpc-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-08-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
 
-# Prod-Route
-route = { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
+  "vars": {
+    "UPSTREAM_RPC": "https://api.mainnet-beta.solana.com",
+    "BACKUP_RPC": "https://solana.publicnode.com",
+    "ALLOWED_ORIGINS": "https://inpinity.online,https://inpinity-mint.pages.dev",
+    "ALLOWED_HEADERS": "content-type,solana-client,accept,accept-language",
+    "CREATOR_PUBKEY": "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp",
+    "REMOTE_CLAIMS_URL": ""
+  },
 
-[vars]
-UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
-BACKUP_RPC   = "https://solana.publicnode.com"
-ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online,https://inpinity-mint.pages.dev"
-ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
-CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
-REMOTE_CLAIMS_URL = ""
+  "kv_namespaces": [
+    { "binding": "CLAIMS", "id": "139ec0627b02429db4507c14b5a3a1fd" }
+  ],
 
-[[kv_namespaces]]
-binding = "CLAIMS"
-id = "139ec0627b02429db4507c14b5a3a1fd"
+  // WICHTIG: keine routes hier angeben – die Route existiert bereits im Dashboard
+  "workers_dev": true // optional, für workers.dev Preview
+}
