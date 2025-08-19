@@ -348,4 +348,44 @@ export default {
     // 404
     return text('Not found', origin, 404);
   }
+}
+// ⬇️ ganz oben hast du schon: parseList, pickOrigin, corsHeaders, json, text ...
+
+// Hilfsfunktion: holt eine URL, legt sie in CF-Cache und liefert Body zurück.
+async function fetchCached(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const r = await fetch(url, {
+      // Edge-Cache aktiv (kein Browser-Cache erzwingen; Cache-Control setzen wir unten selbst)
+      cf: { cacheTtl: 86400, cacheEverything: true } as RequestInitCfProperties,
+    } as RequestInit);
+    if (!r.ok) return null;
+    return await r.arrayBuffer();
+  } catch {
+    return null;
+  }
+}
+
+// ... in export default { async fetch(req, env) { ... } } innerhalb deines großen Handlers:
+if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
+  const allow = parseList(env.ALLOWED_ORIGINS) || [];
+  const origin = pickOrigin(req, allow);
+
+  const sources = [
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+  ];
+
+  for (const s of sources) {
+    const body = await fetchCached(s);
+    if (body) {
+      return new Response(body, {
+        status: 200,
+        headers: corsHeaders(origin, 'application/javascript', {
+          'Cache-Control': 'public, max-age=86400',
+          'X-Vendor-Source': s,
+        }),
+      });
+    }
+  }
+  return text('vendor fetch failed', origin, 502);
 };
