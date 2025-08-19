@@ -34,8 +34,9 @@ function pickOrigin(req: Request, allow: string[]) {
     }
     return a === o;
   });
-  if (isAllowed) return o || allow[0];
-  return allow[0];
+  // Wenn nicht erlaubt: '*' zurückgeben, nicht eine falsche erlaubte Origin
+  if (isAllowed) return o || '*';
+  return '*';
 }
 
 function corsHeaders(origin: string, ctype = 'application/json', extra?: Record<string, string>) {
@@ -43,7 +44,7 @@ function corsHeaders(origin: string, ctype = 'application/json', extra?: Record<
     'Content-Type': ctype,
     'Access-Control-Allow-Origin': origin,
     'Vary': 'Origin, Accept-Encoding',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS,HEAD',
     'Access-Control-Allow-Headers': 'content-type,solana-client,accept,accept-language',
     'Access-Control-Max-Age': '86400',
     ...extra,
@@ -75,7 +76,8 @@ async function rpcForward(env: Env, body: unknown): Promise<Response> {
 
   if (env.BACKUP_RPC) {
     try {
-      return await rpcOnce(env.BACKUP_RPC, body);
+      const rb = await rpcOnce(env.BACKUP_RPC, body);
+      return rb;
     } catch {
       return new Response('UPSTREAM+BACKUP error', { status: 599 });
     }
@@ -156,13 +158,9 @@ export default {
     const allow = parseList(env.ALLOWED_ORIGINS) || [];
     const origin = pickOrigin(req, allow);
 
-    // Header mit optionalen Custom-Allow-Headers
-    const baseHdr = corsHeaders(origin);
-    if (env.ALLOWED_HEADERS) baseHdr['Access-Control-Allow-Headers'] = parseList(env.ALLOWED_HEADERS).join(',');
-
     // Preflight
     if (req.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: baseHdr });
+      return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
     // Health / Info
@@ -292,8 +290,12 @@ export default {
       return json({ signature }, origin);
     }
 
-    /* -------- /claims : GET/POST (mit Duplikatschutz) -------- */
+    /* -------- /claims : GET/POST/HEAD -------- */
     if (url.pathname === '/claims') {
+      if (req.method === 'HEAD') {
+        // Für Tools/Preflights – keine Body-Antwort, nur 200 + CORS
+        return new Response(null, { status: 200, headers: corsHeaders(origin) });
+      }
       if (req.method === 'GET') {
         const claimed = await getClaims(env);
         return json({ claimed }, origin);
@@ -312,19 +314,9 @@ export default {
         }
       }
       return text('Method not allowed', origin, 405);
-
     }
-
-
-
-
-
-
-
-
-
 
     // 404
     return text('Not found', origin, 404);
   }
-};   
+};

@@ -1,18 +1,29 @@
 name = "inpi-proxy-nft"
+
 main = "src/index.ts"
 compatibility_date = "2025-08-19"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
+# Upstreams (403 von mainnet? -> wir failovern automatisch auf BACKUP_RPC)
 UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
-ALLOWED_ORIGINS = "https://mint.inpinity.online,https://inpinity.online"
+BACKUP_RPC   = "https://solana.publicnode.com"
+
+# CORS: alle Origins, die deine Seite verwenden kann
+ALLOWED_ORIGINS = "https://mint.inpinity.online,https://inpinity.online,https://inpinity-mint.pages.dev,https://*.pages.dev"
+ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
+
+# Optional externer JSON-Feed; leer = nur KV
 REMOTE_CLAIMS_URL = ""
+
+# Optional: für /relay(requireCreator)
+CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
+
 [[kv_namespaces]]
 binding = "CLAIMS"
 id = "139ec0627b02429db4507c14b5a3a1fd"
 
-# NUR wenn du die Route wirklich neu setzen willst:
-# (Vorher im Dashboard sicherstellen, dass sie frei ist)
+# **Nur** API-Route – NICHT die Mint-Seite!
 routes = [
-  { pattern = "inpinity.online/mint/*", zone_name = "inpinity.online" }
+  { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
 ]
