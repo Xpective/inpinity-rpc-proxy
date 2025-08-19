@@ -1,5 +1,5 @@
 # wrangler.toml
-name = "inpinity-rpc-proxy"
+name = "inpi-proxy-nft"
 main = "src/index.ts"
 compatibility_date = "2025-08-19"
 
@@ -9,7 +9,7 @@ route = { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
 [vars]
 UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
 BACKUP_RPC   = "https://solana.publicnode.com"
-ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online"
+ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online,https://inpinity-mint.pages.dev"
 ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
 CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
 REMOTE_CLAIMS_URL = ""
