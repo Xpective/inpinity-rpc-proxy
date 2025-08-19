@@ -1,29 +1,33 @@
-name = "inpi-proxy-nft"
-
+name = "inpinity-rpc-proxy"
 main = "src/index.ts"
 compatibility_date = "2025-08-19"
 compatibility_flags = ["nodejs_compat"]
 
+# ==== Umgebungsvariablen ====
 [vars]
-# Upstreams (403 von mainnet? -> wir failovern automatisch auf BACKUP_RPC)
+# Upstreams (Primary + optional Backup)
 UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
 BACKUP_RPC   = "https://solana.publicnode.com"
 
-# CORS: alle Origins, die deine Seite verwenden kann
-ALLOWED_ORIGINS = "https://mint.inpinity.online,https://inpinity.online,https://inpinity-mint.pages.dev,https://*.pages.dev"
+# CORS: erlaube Frontend-Domains (Pages + Hauptdomain)
+ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online,https://inpinity-mint.pages.dev"
 ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
 
-# Optional externer JSON-Feed; leer = nur KV
+# Externe Claims-Quelle (leer lassen = KV wird genutzt)
 REMOTE_CLAIMS_URL = ""
 
-# Optional: für /relay(requireCreator)
+# Optional: Creator als Gate für /relay? (nicht zwingend)
 CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
 
+# Für Stats/Free-Berechnungen (Client nutzt 0..MAX_INDEX)
+MAX_INDEX = "9999"
+
+# ==== KV Binding für Claims ====
 [[kv_namespaces]]
 binding = "CLAIMS"
 id = "139ec0627b02429db4507c14b5a3a1fd"
 
-# **Nur** API-Route – NICHT die Mint-Seite!
+# ==== Route des Workers (API-Subdomain) ====
 routes = [
   { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
 ]
