@@ -17,6 +17,8 @@ export interface Env {
 
   // Optionales Gate für /relay (reine String-Prüfung, kein Signing)
   CREATOR_PUBKEY?: string;                      // z.B. GEFoNL...
+  // Für Stats
+  MAX_INDEX?: string;                           // z.B. "9999"
 }
 
 /* ========================= CORS ========================= */
@@ -25,7 +27,7 @@ const parseList = (s?: string) => (s || '').split(',').map(x => x.trim()).filter
 function pickOrigin(req: Request, allow: string[]) {
   const o = req.headers.get('Origin') || '';
   if (!allow.length) return '*';
-  // einfache Wildcard-Unterstützung für *.pages.dev
+  // Wildcard für *.pages.dev
   const isAllowed = allow.some(a => {
     if (a === '*') return true;
     if (a.includes('*')) {
@@ -34,13 +36,13 @@ function pickOrigin(req: Request, allow: string[]) {
     }
     return a === o;
   });
-  // Wenn nicht erlaubt: '*' zurückgeben, nicht eine falsche erlaubte Origin
-  if (isAllowed) return o || '*';
-  return '*';
+  if (isAllowed) return o || allow[0];
+  // Fallback: erste erlaubte Origin (oder '*', wenn nichts da)
+  return allow[0] || '*';
 }
 
 function corsHeaders(origin: string, ctype = 'application/json', extra?: Record<string, string>) {
-  return {
+  const hdrs: Record<string, string> = {
     'Content-Type': ctype,
     'Access-Control-Allow-Origin': origin,
     'Vary': 'Origin, Accept-Encoding',
@@ -49,6 +51,7 @@ function corsHeaders(origin: string, ctype = 'application/json', extra?: Record<
     'Access-Control-Max-Age': '86400',
     ...extra,
   };
+  return hdrs;
 }
 
 const json = (data: unknown, origin: string, status = 200, extraHdr?: Record<string, string>) =>
@@ -76,8 +79,7 @@ async function rpcForward(env: Env, body: unknown): Promise<Response> {
 
   if (env.BACKUP_RPC) {
     try {
-      const rb = await rpcOnce(env.BACKUP_RPC, body);
-      return rb;
+      return await rpcOnce(env.BACKUP_RPC, body);
     } catch {
       return new Response('UPSTREAM+BACKUP error', { status: 599 });
     }
@@ -120,25 +122,29 @@ async function getClaims(env: Env): Promise<number[]> {
       if (r.ok) {
         const d = await r.json();
         if (Array.isArray(d)) return d;
-        if (Array.isArray(d?.claimed)) return d.claimed;
+        if (Array.isArray((d as any)?.claimed)) return (d as any).claimed;
       }
-    } catch { /* ignore */ }
+    } catch { /* ignore remote errors */ }
   }
   const raw = await env.CLAIMS.get('claimed');
   if (!raw) return [];
   try {
     const j = JSON.parse(raw);
     if (Array.isArray(j)) return j;
-    if (Array.isArray(j?.claimed)) return j.claimed;
-  } catch { /* ignore */ }
+    if (Array.isArray((j as any)?.claimed)) return (j as any).claimed;
+  } catch { /* ignore parse */ }
   return [];
+}
+
+async function saveClaims(env: Env, arr: number[]) {
+  await env.CLAIMS.put('claimed', JSON.stringify(arr));
 }
 
 async function addClaim(env: Env, idx: number): Promise<'created' | 'exists'> {
   const arr = await getClaims(env);
   if (arr.includes(idx)) return 'exists';
   arr.push(idx);
-  await env.CLAIMS.put('claimed', JSON.stringify(arr));
+  await saveClaims(env, arr);
   return 'created';
 }
 
@@ -173,6 +179,7 @@ export default {
         backup: env.BACKUP_RPC || null,
         allowed_origins: env.ALLOWED_ORIGINS || '',
         creator: env.CREATOR_PUBKEY || null,
+        max_index: Number(env.MAX_INDEX || '9999'),
       }, origin);
     }
     if (url.pathname === '/debug') {
@@ -266,10 +273,10 @@ export default {
       };
       const sendResp = await rpcForward(env, sendBody);
       const sendJson = await sendResp.json().catch(() => ({}));
-      if (!sendResp.ok || sendJson?.error) {
-        return json({ error: sendJson?.error || `sendRawTransaction failed ${sendResp.status}` }, origin, 502);
+      if (!sendResp.ok || (sendJson as any)?.error) {
+        return json({ error: (sendJson as any)?.error || `sendRawTransaction failed ${sendResp.status}` }, origin, 502);
       }
-      const signature = sendJson?.result;
+      const signature = (sendJson as any)?.result;
 
       if (body.confirm) {
         const bh = await getLatestBlockhash(env).catch(() => undefined);
@@ -284,21 +291,26 @@ export default {
         };
         const confResp = await rpcForward(env, confBody);
         const confJson = await confResp.json().catch(() => ({}));
-        return json({ signature, confirm: confJson?.result ?? null }, origin);
+        return json({ signature, confirm: (confJson as any)?.result ?? null }, origin);
       }
 
       return json({ signature }, origin);
     }
 
-    /* -------- /claims : GET/POST/HEAD -------- */
+    /* -------- /claims : GET/POST/HEAD + Stats -------- */
     if (url.pathname === '/claims') {
       if (req.method === 'HEAD') {
-        // Für Tools/Preflights – keine Body-Antwort, nur 200 + CORS
+        // praktischer Health/Preflight-Check
         return new Response(null, { status: 200, headers: corsHeaders(origin) });
       }
       if (req.method === 'GET') {
         const claimed = await getClaims(env);
-        return json({ claimed }, origin);
+        // ETag (einfacher Hash via length+first+last) — cachbar
+        const tag = `W/"c${claimed.length}-${claimed[0] ?? -1}-${claimed[claimed.length-1] ?? -1}"`;
+        return new Response(JSON.stringify({ claimed }), {
+          status: 200,
+          headers: corsHeaders(origin, 'application/json', { ETag: tag }),
+        });
       }
       if (req.method === 'POST') {
         try {
@@ -314,6 +326,23 @@ export default {
         }
       }
       return text('Method not allowed', origin, 405);
+    }
+
+    if (url.pathname === '/claims/stats' && req.method === 'GET') {
+      const max = Number(env.MAX_INDEX || '9999');
+      const claimed = await getClaims(env);
+      const set = new Set<number>(claimed);
+      const freeCount = (max + 1) - set.size;
+      return json({ max_index: max, claimed_count: set.size, free_count: freeCount }, origin);
+    }
+
+    if (url.pathname === '/claims/free' && req.method === 'GET') {
+      // Achtung: kann groß sein (10k). Besser nur für Debug.
+      const max = Number(env.MAX_INDEX || '9999');
+      const claimed = new Set<number>(await getClaims(env));
+      const free: number[] = [];
+      for (let i = 0; i <= max; i++) if (!claimed.has(i)) free.push(i);
+      return json({ free }, origin);
     }
 
     // 404
