@@ -100,7 +100,7 @@ async function getLatestBlockhash(env: Env): Promise<string> {
   };
   const r = await rpcForward(env, body);
   if (!r.ok) throw new Error(`RPC ${r.status}`);
-  const j = await r.json<any>();
+  const j = await r.json();
   const bh = j?.result?.value?.blockhash || j?.result?.blockhash;
   if (!bh) throw new Error('No blockhash');
   _lastBlockhash = bh;
@@ -114,9 +114,9 @@ async function getClaims(env: Env): Promise<number[]> {
     try {
       const r = await fetch(env.REMOTE_CLAIMS_URL, {
         cf: { cacheTtl: 60, cacheEverything: true } as RequestInitCfProperties,
-      });
+      } as RequestInit);
       if (r.ok) {
-        const d = await r.json<any>();
+        const d = await r.json();
         if (Array.isArray(d)) return d;
         if (Array.isArray(d?.claimed)) return d.claimed;
       }
@@ -267,7 +267,7 @@ export default {
         ]
       };
       const sendResp = await rpcForward(env, sendBody);
-      const sendJson = await sendResp.json<any>().catch(() => ({}));
+      const sendJson = await sendResp.json().catch(() => ({}));
       if (!sendResp.ok || sendJson?.error) {
         return json({ error: sendJson?.error || `sendRawTransaction failed ${sendResp.status}` }, origin, 502);
       }
@@ -285,7 +285,7 @@ export default {
           ]
         };
         const confResp = await rpcForward(env, confBody);
-        const confJson = await confResp.json<any>().catch(() => ({}));
+        const confJson = await confResp.json().catch(() => ({}));
         return json({ signature, confirm: confJson?.result ?? null }, origin);
       }
 
@@ -312,9 +312,19 @@ export default {
         }
       }
       return text('Method not allowed', origin, 405);
+
     }
+
+
+
+
+
+
+
+
+
 
     // 404
     return text('Not found', origin, 404);
   }
-};
+};   
