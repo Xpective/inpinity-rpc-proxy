@@ -1,0 +1,19 @@
+# wrangler.toml
+name = "inpinity-rpc-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-08-19"
+
+# Prod-Route
+route = { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
+
+[vars]
+UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
+BACKUP_RPC   = "https://solana.publicnode.com"
+ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online"
+ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
+CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
+REMOTE_CLAIMS_URL = ""
+
+[[kv_namespaces]]
+binding = "CLAIMS"
+id = "139ec0627b02429db4507c14b5a3a1fd"
