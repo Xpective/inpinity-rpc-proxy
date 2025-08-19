@@ -4,30 +4,32 @@ import type { KVNamespace, RequestInitCfProperties } from '@cloudflare/workers-t
 /* ========================= ENV ========================= */
 export interface Env {
   // RPC Upstreams
-  UPSTREAM_RPC: string;                         // z.B. https://api.mainnet-beta.solana.com
-  BACKUP_RPC?: string;                          // z.B. https://solana.publicnode.com
+  UPSTREAM_RPC: string;        // z.B. https://api.mainnet-beta.solana.com
+  BACKUP_RPC?: string;         // z.B. https://solana.publicnode.com
 
   // CORS
-  ALLOWED_ORIGINS?: string;                     // CSV: https://inpinity.online,https://mint.inpinity.online,https://*.pages.dev
-  ALLOWED_HEADERS?: string;                     // CSV: content-type,solana-client,accept,accept-language
+  ALLOWED_ORIGINS?: string;    // CSV: https://inpinity.online,https://inpinity-mint.pages.dev,https://*.pages.dev
+  ALLOWED_HEADERS?: string;    // CSV (optional): content-type,solana-client,accept,accept-language
 
   // Claims
-  CLAIMS: KVNamespace;                          // KV-Binding (muss im wrangler.toml stehen)
-  REMOTE_CLAIMS_URL?: string;                   // optional externer JSON-Endpunkt {claimed:[...]}
+  CLAIMS: KVNamespace;         // KV-Binding (wrangler.toml)
+  REMOTE_CLAIMS_URL?: string;  // optional externer JSON-Endpunkt {claimed:[...]}
 
   // Optionales Gate für /relay (reine String-Prüfung, kein Signing)
-  CREATOR_PUBKEY?: string;                      // z.B. GEFoNL...
+  CREATOR_PUBKEY?: string;     // z.B. GEFoNL...
   // Für Stats
-  MAX_INDEX?: string;                           // z.B. "9999"
+  MAX_INDEX?: string;          // z.B. "9999"
 }
 
 /* ========================= CORS ========================= */
-const parseList = (s?: string) => (s || '').split(',').map(x => x.trim()).filter(Boolean);
+const parseList = (s?: string) => (s || '')
+  .split(',')
+  .map(x => x.trim())
+  .filter(Boolean);
 
 function pickOrigin(req: Request, allow: string[]) {
   const o = req.headers.get('Origin') || '';
   if (!allow.length) return '*';
-  // Wildcard für *.pages.dev
   const isAllowed = allow.some(a => {
     if (a === '*') return true;
     if (a.includes('*')) {
@@ -36,12 +38,11 @@ function pickOrigin(req: Request, allow: string[]) {
     }
     return a === o;
   });
-  if (isAllowed) return o || allow[0];
-  // Fallback: erste erlaubte Origin (oder '*', wenn nichts da)
-  return allow[0] || '*';
+  return isAllowed ? (o || allow[0]) : (allow[0] || '*');
 }
 
 function corsHeaders(origin: string, ctype = 'application/json', extra?: Record<string, string>) {
+  // Falls du ALLOWED_HEADERS aus ENV verwenden willst, hier leicht erweiterbar.
   const hdrs: Record<string, string> = {
     'Content-Type': ctype,
     'Access-Control-Allow-Origin': origin,
@@ -75,7 +76,7 @@ async function rpcForward(env: Env, body: unknown): Promise<Response> {
   try {
     const r = await rpcOnce(env.UPSTREAM_RPC, body);
     if (!isRetryable(r.status)) return r;
-  } catch { /* fallthrough to backup */ }
+  } catch { /* fallthrough */ }
 
   if (env.BACKUP_RPC) {
     try {
@@ -124,7 +125,7 @@ async function getClaims(env: Env): Promise<number[]> {
         if (Array.isArray(d)) return d;
         if (Array.isArray((d as any)?.claimed)) return (d as any).claimed;
       }
-    } catch { /* ignore remote errors */ }
+    } catch { /* ignore */ }
   }
   const raw = await env.CLAIMS.get('claimed');
   if (!raw) return [];
@@ -132,7 +133,7 @@ async function getClaims(env: Env): Promise<number[]> {
     const j = JSON.parse(raw);
     if (Array.isArray(j)) return j;
     if (Array.isArray((j as any)?.claimed)) return (j as any).claimed;
-  } catch { /* ignore parse */ }
+  } catch { /* ignore */ }
   return [];
 }
 
@@ -148,13 +149,26 @@ async function addClaim(env: Env, idx: number): Promise<'created' | 'exists'> {
   return 'created';
 }
 
-/* ========================= Body-Guard ========================= */
+/* ========================= Helpers ========================= */
 const MAX_BODY_BYTES = 512 * 1024; // 512 KB
 
 async function readJsonSafe<T = any>(req: Request): Promise<T> {
   const len = Number(req.headers.get('content-length') || 0);
   if (len && len > MAX_BODY_BYTES) throw new Error('Payload too large');
   return req.json() as Promise<T>;
+}
+
+// Holt eine externe URL, cached sie im Edge und liefert den Body.
+async function fetchCached(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const r = await fetch(url, {
+      cf: { cacheTtl: 86400, cacheEverything: true } as RequestInitCfProperties,
+    } as RequestInit);
+    if (!r.ok) return null;
+    return await r.arrayBuffer();
+  } catch {
+    return null;
+  }
 }
 
 /* ========================= WORKER HANDLER ========================= */
@@ -169,7 +183,28 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
-    // Health / Info
+    /* -------- /vendor : liefert UMD aus eigener Origin -------- */
+    if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
+      const sources = [
+        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+      ];
+      for (const s of sources) {
+        const body = await fetchCached(s);
+        if (body) {
+          return new Response(body, {
+            status: 200,
+            headers: corsHeaders(origin, 'application/javascript', {
+              'Cache-Control': 'public, max-age=86400',
+              'X-Vendor-Source': s,
+            }),
+          });
+        }
+      }
+      return text('vendor fetch failed', origin, 502);
+    }
+
+    /* -------- Health / Info -------- */
     if (url.pathname === '/' || url.pathname === '/health') {
       return text('OK: inpinity-rpc-proxy', origin);
     }
@@ -183,7 +218,10 @@ export default {
       }, origin);
     }
     if (url.pathname === '/debug') {
-      return json({ now: Date.now(), blockhash_cache: { value: _lastBlockhash, age_ms: Date.now() - _lastBlockTs } }, origin);
+      return json(
+        { now: Date.now(), blockhash_cache: { value: _lastBlockhash, age_ms: Date.now() - _lastBlockTs } },
+        origin
+      );
     }
 
     /* -------- /rpc : JSON-RPC Proxy -------- */
@@ -242,7 +280,7 @@ export default {
         confirm?: boolean;
         confirmCommitment?: 'processed'|'confirmed'|'finalized';
         requireCreator?: boolean;
-        signer?: string; // Base58 public key des ersten Signers (Client meldet das)
+        signer?: string; // Base58 public key des ersten Signers
       };
       let body: RelayReq;
       try { body = await readJsonSafe<RelayReq>(req); }
@@ -300,12 +338,10 @@ export default {
     /* -------- /claims : GET/POST/HEAD + Stats -------- */
     if (url.pathname === '/claims') {
       if (req.method === 'HEAD') {
-        // praktischer Health/Preflight-Check
         return new Response(null, { status: 200, headers: corsHeaders(origin) });
       }
       if (req.method === 'GET') {
         const claimed = await getClaims(env);
-        // ETag (einfacher Hash via length+first+last) — cachbar
         const tag = `W/"c${claimed.length}-${claimed[0] ?? -1}-${claimed[claimed.length-1] ?? -1}"`;
         return new Response(JSON.stringify({ claimed }), {
           status: 200,
@@ -337,7 +373,6 @@ export default {
     }
 
     if (url.pathname === '/claims/free' && req.method === 'GET') {
-      // Achtung: kann groß sein (10k). Besser nur für Debug.
       const max = Number(env.MAX_INDEX || '9999');
       const claimed = new Set<number>(await getClaims(env));
       const free: number[] = [];
@@ -348,44 +383,4 @@ export default {
     // 404
     return text('Not found', origin, 404);
   }
-}
-// ⬇️ ganz oben hast du schon: parseList, pickOrigin, corsHeaders, json, text ...
-
-// Hilfsfunktion: holt eine URL, legt sie in CF-Cache und liefert Body zurück.
-async function fetchCached(url: string): Promise<ArrayBuffer | null> {
-  try {
-    const r = await fetch(url, {
-      // Edge-Cache aktiv (kein Browser-Cache erzwingen; Cache-Control setzen wir unten selbst)
-      cf: { cacheTtl: 86400, cacheEverything: true } as RequestInitCfProperties,
-    } as RequestInit);
-    if (!r.ok) return null;
-    return await r.arrayBuffer();
-  } catch {
-    return null;
-  }
-}
-
-// ... in export default { async fetch(req, env) { ... } } innerhalb deines großen Handlers:
-if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
-  const allow = parseList(env.ALLOWED_ORIGINS) || [];
-  const origin = pickOrigin(req, allow);
-
-  const sources = [
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-  ];
-
-  for (const s of sources) {
-    const body = await fetchCached(s);
-    if (body) {
-      return new Response(body, {
-        status: 200,
-        headers: corsHeaders(origin, 'application/javascript', {
-          'Cache-Control': 'public, max-age=86400',
-          'X-Vendor-Source': s,
-        }),
-      });
-    }
-  }
-  return text('vendor fetch failed', origin, 502);
 };
