@@ -166,58 +166,124 @@ export default {
     }
 
     /* -------- VENDOR: Metaplex mpl-token-metadata UMD -------- */
-    if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
-      const sources = [
-        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-      ];
-      for (const s of sources) {
-        const body = await fetchCached(s);
-        if (body) {
-          return new Response(body, {
-            status: 200,
-            headers: cors('application/javascript', { 'Cache-Control': 'public, max-age=86400', 'X-Vendor-Source': s }),
-          });
-        }
-      }
-      return text('vendor fetch failed', 502);
-    }
+if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
+  // Wir probieren mehrere real existierende Varianten (Version & Pfad)
+  const candidates = [
+    // v3.x Standardpfade
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
 
-    /* -------- VENDOR: optional web3.js IIFE -------- */
-    if (url.pathname === '/vendor/web3js.js') {
-      const sources = [
-        'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js',
-        'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js',
-      ];
-      for (const s of sources) {
-        const body = await fetchCached(s);
-        if (body) {
-          return new Response(body, {
-            status: 200,
-            headers: cors('application/javascript', { 'Cache-Control': 'public, max-age=86400', 'X-Vendor-Source': s }),
-          });
-        }
-      }
-      return text('vendor fetch failed', 502);
-    }
+    // alternative Dateinamen, die es je nach Build geben kann
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
 
-    /* -------- VENDOR: optional spl-token IIFE -------- */
-    if (url.pathname === '/vendor/spl-token.js') {
-      const sources = [
-        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
-        'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
-      ];
-      for (const s of sources) {
-        const body = await fetchCached(s);
-        if (body) {
-          return new Response(body, {
-            status: 200,
-            headers: cors('application/javascript', { 'Cache-Control': 'public, max-age=86400', 'X-Vendor-Source': s }),
-          });
-        }
+    // ältere 3.x Fallbacks
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.2.0/dist/index.umd.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.2.0/dist/index.umd.js',
+
+    // ganz alte Legacy-Pfade (falls die Dist-Struktur anders ist)
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.1.0/dist/index.umd.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.1.0/dist/index.umd.js',
+  ];
+
+  const errors: string[] = [];
+  for (const s of candidates) {
+    try {
+      const body = await fetchCached(s);
+      if (body) {
+        return new Response(body, {
+          status: 200,
+          headers: {
+            ...cors('application/javascript', { 'Cache-Control': 'public, max-age=86400' }),
+            'X-Vendor-Source': s,
+          },
+        });
+      } else {
+        errors.push(`MISS ${s}`);
       }
-      return text('vendor fetch failed', 502);
+    } catch (e: any) {
+      errors.push(`ERR  ${s} :: ${String(e?.message || e)}`);
     }
+  }
+  return new Response('vendor fetch failed', {
+    status: 502,
+    headers: { ...cors('text/plain'), 'X-Vendor-Errors': errors.slice(0, 10).join(' | ') },
+  });
+}
+
+/* -------- VENDOR: optional web3.js IIFE -------- */
+if (url.pathname === '/vendor/web3js.js') {
+  const candidates = [
+    'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js',
+    'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js',
+    // zusätzliche Fallbacks (nicht notwendig, aber nice-to-have)
+    'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.js',
+    'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.js',
+  ];
+  const errors: string[] = [];
+  for (const s of candidates) {
+    try {
+      const body = await fetchCached(s);
+      if (body) {
+        return new Response(body, {
+          status: 200,
+          headers: {
+            ...cors('application/javascript', { 'Cache-Control': 'public, max-age=86400' }),
+            'X-Vendor-Source': s,
+          },
+        });
+      } else {
+        errors.push(`MISS ${s}`);
+      }
+    } catch (e: any) {
+      errors.push(`ERR  ${s} :: ${String(e?.message || e)}`);
+    }
+  }
+  return new Response('vendor fetch failed', {
+    status: 502,
+    headers: { ...cors('text/plain'), 'X-Vendor-Errors': errors.slice(0, 10).join(' | ') },
+  });
+}
+
+/* -------- VENDOR: optional spl-token IIFE -------- */
+if (url.pathname === '/vendor/spl-token.js') {
+  const candidates = [
+    // unterschiedliche Artefakt-Namen und min/non-min
+    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.min.js',
+    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.min.js',
+    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
+    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
+
+    // ältere Fallbacks
+    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.3/dist/index.iife.min.js',
+    'https://unpkg.com/@solana/spl-token@0.4.3/dist/index.iife.min.js',
+  ];
+  const errors: string[] = [];
+  for (const s of candidates) {
+    try {
+      const body = await fetchCached(s);
+      if (body) {
+        return new Response(body, {
+          status: 200,
+          headers: {
+            ...cors('application/javascript', { 'Cache-Control': 'public, max-age=86400' }),
+            'X-Vendor-Source': s,
+          },
+        });
+      } else {
+        errors.push(`MISS ${s}`);
+      }
+    } catch (e: any) {
+      errors.push(`ERR  ${s} :: ${String(e?.message || e)}`);
+    }
+  }
+  return new Response('vendor fetch failed', {
+    status: 502,
+    headers: { ...cors('text/plain'), 'X-Vendor-Errors': errors.slice(0, 10).join(' | ') },
+  });
+}
 
     /* -------- JSON-RPC proxy -------- */
     if (url.pathname === '/rpc' && req.method === 'POST') {
