@@ -1,34 +1,31 @@
-# wrangler.toml
-name = "inpi-proxy-nft"
+name = "inpi-proxy-nft"               # <- benutze den aktiven Worker-Namen
 main = "src/index.ts"
-compatibility_date = "2024-12-01"
+compatibility_date = "2025-08-19"
 compatibility_flags = ["nodejs_compat"]
 
 # ==== Umgebungsvariablen ====
 [vars]
-# Upstreams (Primary + optional Backup)
 UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
 BACKUP_RPC   = "https://solana.publicnode.com"
 
-# CORS: erlaube Frontend-Domains (Pages + Hauptdomain)
 ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online,https://inpinity-mint.pages.dev"
 ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
 
-# Externe Claims-Quelle (leer lassen = KV wird genutzt)
 REMOTE_CLAIMS_URL = ""
-
-# Optional: Creator als Gate für /relay (nicht zwingend)
 CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
-
-# Für Stats/Free-Berechnungen (Client nutzt 0..MAX_INDEX)
 MAX_INDEX = "9999"
 
-# ==== KV Binding für Claims ====
+# ==== KV Bindings ====
 [[kv_namespaces]]
 binding = "CLAIMS"
 id = "139ec0627b02429db4507c14b5a3a1fd"
 
-# ==== Route auf API-Subdomain ====
+[[kv_namespaces]]
+binding = "VENDOR"
+# erst in CF-Dashboard anlegen, ID hier eintragen:
+id = "<KV_ID_VENDOR>"
+
+# ==== Route ====
 routes = [
   { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
 ]
