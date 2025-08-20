@@ -1,6 +1,7 @@
-name = "inpinity-rpc-proxy"
+# wrangler.toml
+name = "inpi-proxy-nft"
 main = "src/index.ts"
-compatibility_date = "2025-08-19"
+compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
 # ==== Umgebungsvariablen ====
@@ -16,7 +17,7 @@ ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
 # Externe Claims-Quelle (leer lassen = KV wird genutzt)
 REMOTE_CLAIMS_URL = ""
 
-# Optional: Creator als Gate für /relay? (nicht zwingend)
+# Optional: Creator als Gate für /relay (nicht zwingend)
 CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
 
 # Für Stats/Free-Berechnungen (Client nutzt 0..MAX_INDEX)
@@ -27,7 +28,7 @@ MAX_INDEX = "9999"
 binding = "CLAIMS"
 id = "139ec0627b02429db4507c14b5a3a1fd"
 
-# ==== Route des Workers (API-Subdomain) ====
+# ==== Route auf API-Subdomain ====
 routes = [
   { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
 ]
