@@ -141,7 +141,6 @@ async function serveVendorFromKV(env: Env, key: string, candidates: string[], or
     try {
       const body = await fetchCached(url);
       if (body) {
-        // In KV persistieren (ArrayBuffer wird akzeptiert)
         await env.VENDOR.put(key, body as any);
         return new Response(body, {
           status: 200,
@@ -170,11 +169,30 @@ type MintItem = {
   wallet: string;
   sig: string;
   ts: number;
-  // neu & optional:
   collection?: string;
   name?: string;
   uri?: string;
 };
+
+const PFX_MINT_ID = 'mint:id:';         // genau 1 Datensatz je ID
+const PFX_WAL     = 'mint:wal:';        // Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
+const KEY_MINT_COUNT = 'mint_count';    // einfacher Zähler
+
+async function putMint(env: Env, it: MintItem) {
+  // Voller Datensatz unter der ID
+  await env.CLAIMS.put(PFX_MINT_ID + it.id, JSON.stringify(it), {
+    expirationTtl: 60 * 60 * 24 * 365 * 10
+  });
+
+  // Kompakter Zeiteintrag pro Wallet (für schnelle "by-wallet"-Listen)
+  const compact = { id: it.id, mint: it.mint, sig: it.sig, ts: it.ts, collection: it.collection, name: it.name, uri: it.uri };
+  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify(compact), {
+    expirationTtl: 60 * 60 * 24 * 365 * 10
+  });
+
+  const cur = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
+  await env.CLAIMS.put(KEY_MINT_COUNT, String(cur + 1));
+}
 
 async function getMintById(env: Env, id: number): Promise<MintItem | null> {
   const v = await env.CLAIMS.get(PFX_MINT_ID + id);
@@ -183,7 +201,7 @@ async function getMintById(env: Env, id: number): Promise<MintItem | null> {
 
 async function listByWallet(env: Env, wallet: string, limit = 10, cursor?: string) {
   const res = await env.CLAIMS.list({ prefix: `${PFX_WAL}${wallet}:`, limit: Math.min(Math.max(limit, 1), 1000), cursor });
-  const items: Array<{ id: number; mint: string; sig: string; ts: number }> = [];
+  const items: Array<{ id: number; mint: string; sig: string; ts: number; collection?: string; name?: string; uri?: string }> = [];
   for (const k of res.keys) {
     const v = await env.CLAIMS.get(k.name);
     if (!v) continue;
@@ -298,7 +316,7 @@ export default {
       catch (e: any) { return json({ error: String(e?.message || e) }, 502); }
     }
 
-    /* -------- simulate -------- */
+    /* -------- simulate (optional, nützlich fürs Debuggen) -------- */
     if (url.pathname === '/simulate' && req.method === 'POST') {
       type SimReq = { tx: string; sigVerify?: boolean; replaceRecentBlockhash?: boolean; };
       let body: SimReq;
@@ -313,7 +331,7 @@ export default {
       return new Response(data, { status: r.status, headers: cors('application/json') });
     }
 
-    /* -------- relay -------- */
+    /* -------- relay (optional) -------- */
     if (url.pathname === '/relay' && req.method === 'POST') {
       type RelayReq = {
         tx: string; skipPreflight?: boolean; maxRetries?: number;
@@ -390,7 +408,7 @@ export default {
 
     /* -------- Mint Registry -------- */
     if (url.pathname === '/mints' && req.method === 'POST') {
-      type Body = { id?: unknown; mint?: unknown; wallet?: unknown; sig?: unknown };
+      type Body = { id?: unknown; mint?: unknown; wallet?: unknown; sig?: unknown; collection?: unknown; name?: unknown; uri?: unknown };
       let body: Body;
       try { body = await readJsonSafe<Body>(req); } catch { return text('Bad JSON or too large', 400); }
 
@@ -398,11 +416,14 @@ export default {
       const mint = String(body.mint || '').trim();
       const wallet = String(body.wallet || '').trim();
       const sig = String(body.sig || '').trim();
+      const collection = String((body.collection ?? '') as string).trim();
+      const name = String((body.name ?? '') as string).trim();
+      const uri = String((body.uri ?? '') as string).trim();
 
       if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
       if (!mint || !wallet || !sig) return json({ error: 'mint/wallet/sig required' }, 400);
 
-      const item: MintItem = { id, mint, wallet, sig, ts: Date.now() };
+      const item: MintItem = { id, mint, wallet, sig, ts: Date.now(), collection, name, uri };
       await putMint(env, item);
       return json({ ok: true, item });
     }
