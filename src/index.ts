@@ -164,18 +164,17 @@ async function serveVendorFromKV(env: Env, key: string, candidates: string[], or
 }
 
 /* ========================= Mint Registry (CLAIMS KV Prefixe) ========================= */
-type MintItem = { id: number; mint: string; wallet: string; sig: string; ts: number };
-
-const PFX_MINT_ID = 'mint:id:';         // genau 1 Datensatz je ID
-const PFX_WAL     = 'mint:wal:';        // Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
-const KEY_MINT_COUNT = 'mint_count';    // einfacher Zähler
-
-async function putMint(env: Env, it: MintItem) {
-  await env.CLAIMS.put(PFX_MINT_ID + it.id, JSON.stringify(it), { expirationTtl: 60 * 60 * 24 * 365 * 10 });
-  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify({ id: it.id, mint: it.mint, sig: it.sig, ts: it.ts }), { expirationTtl: 60 * 60 * 24 * 365 * 10 });
-  const cur = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
-  await env.CLAIMS.put(KEY_MINT_COUNT, String(cur + 1));
-}
+type MintItem = {
+  id: number;
+  mint: string;
+  wallet: string;
+  sig: string;
+  ts: number;
+  // neu & optional:
+  collection?: string;
+  name?: string;
+  uri?: string;
+};
 
 async function getMintById(env: Env, id: number): Promise<MintItem | null> {
   const v = await env.CLAIMS.get(PFX_MINT_ID + id);
