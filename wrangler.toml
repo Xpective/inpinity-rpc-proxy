@@ -19,6 +19,10 @@ MAX_INDEX = "9999"
 [[kv_namespaces]]
 binding = "CLAIMS"
 id = "139ec0627b02429db4507c14b5a3a1fd"
+# NEU: MINTS-Registry
+[[kv_namespaces]]
+binding = "MINTS"
+id = "<139ec0627b02429db4507c14b5a3a1fd>"
 
 [[kv_namespaces]]
 binding = "VENDOR"
