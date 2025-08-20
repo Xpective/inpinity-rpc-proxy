@@ -14,6 +14,8 @@ export interface Env {
 
   CREATOR_PUBKEY?: string;
   MAX_INDEX?: string;
+  
+  VENDOR: KVNamespace;
 }
 
 /* ========================= CORS helpers ========================= */
@@ -102,7 +104,46 @@ async function getClaims(env: Env): Promise<number[]> {
   } catch {}
   return [];
 }
+async function serveVendorFromKV(
+  env: Env,
+  key: string,
+  candidates: string[],
+  origin: string
+): Promise<Response> {
+  // 1) aus KV?
+  const cached = await env.VENDOR.get(key, { type: 'arrayBuffer' });
+  if (cached) {
+    return new Response(cached, {
+      status: 200,
+      headers: corsHeaders(origin, 'application/javascript', { 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Vendor-Source': `kv:${key}` })
+    });
+  }
 
+  // 2) sonst versuchen wir Kandidaten zu holen & in KV zu legen
+  const errors: string[] = [];
+  for (const url of candidates) {
+    try {
+      const body = await fetchCached(url);
+      if (body) {
+        // in KV persistieren
+        await env.VENDOR.put(key, new Uint8Array(body) as any);
+        return new Response(body, {
+          status: 200,
+          headers: corsHeaders(origin, 'application/javascript', { 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Vendor-Source': url })
+        });
+      } else {
+        errors.push(`MISS ${url}`);
+      }
+    } catch (e: any) {
+      errors.push(`ERR ${url} :: ${String(e?.message || e)}`);
+    }
+  }
+
+  return new Response('vendor fetch failed', {
+    status: 502,
+    headers: { ...corsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 12).join(' | ') }
+  });
+}
 async function saveClaims(env: Env, arr: number[]) { await env.CLAIMS.put('claimed', JSON.stringify(arr)); }
 
 async function addClaim(env: Env, idx: number): Promise<'created' | 'exists'> {
