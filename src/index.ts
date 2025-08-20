@@ -52,6 +52,58 @@ export default {
       return handleMintsListGET(request, env, corsBase, varyBase);
     }
 
+    /* ======= Routen: Mint Registry ======= */
+if (url.pathname === '/mints' && req.method === 'POST') {
+  // Body prüfen & speichern
+  type Body = { id?: unknown; mint?: unknown; wallet?: unknown; sig?: unknown };
+  let body: Body;
+  try { body = await readJsonSafe<Body>(req); } catch { return text('Bad JSON or too large', 400); }
+
+  const id = Number(body.id);
+  const mint = String(body.mint || '').trim();
+  const wallet = String(body.wallet || '').trim();
+  const sig = String(body.sig || '').trim();
+
+  if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
+  if (!mint || !wallet || !sig) return json({ error: 'mint/wallet/sig required' }, 400);
+
+  const now = Date.now();
+  const item: MintItem = { id, mint, wallet, sig, ts: now };
+
+  // id darf wiederverwendet werden? => wir überschreiben bewusst (gleiche ID)
+  await putMint(env, item);
+  return json({ ok: true, item });
+}
+
+if ((url.pathname === '/mints/by-id') && req.method === 'GET') {
+  const id = Number(url.searchParams.get('id') || '-1');
+  if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
+  const item = await getMintById(env, id);
+  return item ? json({ item }) : json({ error: 'not found' }, 404);
+}
+
+if ((url.pathname === '/mints/by-wallet') && req.method === 'GET') {
+  const wallet = String(url.searchParams.get('wallet') || '').trim();
+  const limit = Number(url.searchParams.get('limit') || '10');
+  const cursor = url.searchParams.get('cursor') || undefined;
+  if (!wallet) return json({ error: 'wallet required' }, 400);
+  const out = await listByWallet(env, wallet, limit, cursor);
+  return json(out);
+}
+
+if ((url.pathname === '/mints/recent' || (url.pathname === '/mints' && req.method === 'GET')) && req.method === 'GET') {
+  // GET /mints → Alias zu /mints/recent
+  const limit = Number(url.searchParams.get('limit') || '50');
+  const cursor = url.searchParams.get('cursor') || undefined;
+  const out = await listMintsRecent(env, limit, cursor);
+  return json(out);
+}
+
+if (url.pathname === '/mints/count' && req.method === 'GET') {
+  const n = Number((await env.CLAIMS.get('mint_count')) || '0');
+  return json({ count: n });
+}
+
     // … hier laufen deine bestehenden Routen weiter (health, config, rpc, claims, vendor, etc.)
     // return existingRouter(request, env, ctx);
 
@@ -68,6 +120,55 @@ export default {
  *    MINTS.put(`mint:${mint}`, JSON)      // schneller Lookup, optional
  *    MINTS.put(`wallet:${wallet}:${ts}`, JSON)  // per-wallet Zeitreihe
  */
+/* ======= Mint Registry helpers (KV nutzt dasselbe Namespace: CLAIMS) ======= */
+type MintItem = { id: number; mint: string; wallet: string; sig: string; ts: number };
+
+async function putMint(env: Env, it: MintItem) {
+  // Einzelobjekt
+  await env.CLAIMS.put(`mint:${it.id}`, JSON.stringify(it));
+  // Per Wallet indexieren (Key mit Timestamp für Sortierung)
+  await env.CLAIMS.put(`wallet:${it.wallet}:${it.ts}`, JSON.stringify({ id: it.id, mint: it.mint, sig: it.sig }));
+  // Zähler (best effort)
+  const cur = Number((await env.CLAIMS.get('mint_count')) || '0');
+  await env.CLAIMS.put('mint_count', String(cur + 1));
+}
+
+async function getMintById(env: Env, id: number): Promise<MintItem | null> {
+  const v = await env.CLAIMS.get(`mint:${id}`);
+  return v ? JSON.parse(v) as MintItem : null;
+}
+
+async function listMintsRecent(env: Env, limit = 50, cursor?: string) {
+  // Wir listen alle Schlüssel mit Prefix "mint:" und sortieren absteigend anhand der ID (numerisch).
+  // Da KV.list() alphabetisch sortiert, nutzen wir List+Filter in App – oder (besser) eine zweite Struktur.
+  // Hier: wir listen wallet-agnostisch per Prefix "mint:" und liefern roh zurück; Client kann sortieren.
+  const res = await env.CLAIMS.list({ prefix: 'mint:', limit: Math.min(Math.max(limit, 1), 1000), cursor });
+  const items: MintItem[] = [];
+  for (const k of res.keys) {
+    const v = await env.CLAIMS.get(k.name);
+    if (v) items.push(JSON.parse(v));
+  }
+  // optional absteigend nach ts
+  items.sort((a,b)=> (b.ts||0) - (a.ts||0));
+  return { items, cursor: res.cursor || null, list_complete: res.list_complete === true };
+}
+
+async function listByWallet(env: Env, wallet: string, limit = 10, cursor?: string) {
+  const res = await env.CLAIMS.list({ prefix: `wallet:${wallet}:`, limit: Math.min(Math.max(limit, 1), 1000), cursor });
+  // Werte laden
+  const items: Array<{id:number; mint:string; sig:string; ts:number}> = [];
+  for (const k of res.keys) {
+    const v = await env.CLAIMS.get(k.name);
+    if (!v) continue;
+    const row = JSON.parse(v);
+    // ts steckt im Keyende: wallet:<wallet>:<ts>
+    const tsPart = Number(k.name.split(':').pop() || '0');
+    items.push({ ...row, ts: tsPart });
+  }
+  // absteigend nach ts
+  items.sort((a,b)=> b.ts - a.ts);
+  return { items, cursor: res.cursor || null, list_complete: res.list_complete === true };
+}
 
 async function handleMintRecordPOST(request, env, corsBase, varyBase) {
   try {
