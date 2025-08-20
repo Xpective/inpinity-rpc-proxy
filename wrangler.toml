@@ -1,35 +1,39 @@
-name = "inpi-proxy-nft"               # <- benutze den aktiven Worker-Namen
+name = "inpi-proxy-nft"
 main = "src/index.ts"
 compatibility_date = "2025-08-19"
 compatibility_flags = ["nodejs_compat"]
 
-# ==== Umgebungsvariablen ====
-[vars]
-UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
-BACKUP_RPC   = "https://solana.publicnode.com"
-
-ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online,https://inpinity-mint.pages.dev"
-ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
-
-REMOTE_CLAIMS_URL = ""
-CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
-MAX_INDEX = "9999"
-
-# ==== KV Bindings ====
-[[kv_namespaces]]
-binding = "CLAIMS"
-id = "139ec0627b02429db4507c14b5a3a1fd"
-# NEU: MINTS-Registry
-[[kv_namespaces]]
-binding = "MINTS"
-id = "758f0d5b2c9f42ab8f97e662692d5e15"
-
-[[kv_namespaces]]
-binding = "VENDOR"
-# erst in CF-Dashboard anlegen, ID hier eintragen:
-id = "a6bf0aa165cf4be7b2a6621004175315"
-
-# ==== Route ====
+# Auf eigene Domain routen (prod). Für workers.dev-Tests -> diesen Block weglassen.
 routes = [
   { pattern = "api.inpinity.online/*", zone_name = "inpinity.online" }
 ]
+
+# ===== Umgebungsvariablen =====
+[vars]
+# Direkt Solana Mainnet
+UPSTREAM_RPC = "https://api.mainnet-beta.solana.com"
+# Backup (optional; kann mal 504en, aber ok als Fallback)
+BACKUP_RPC   = "https://solana.publicnode.com"
+
+# CORS: Origins, die dein Frontend hosten
+ALLOWED_ORIGINS = "https://inpinity.online,https://mint.inpinity.online,https://inpinity-mint.pages.dev"
+# Zusätzliche erlaubte Header (falls nötig)
+ALLOWED_HEADERS = "content-type,solana-client,accept,accept-language"
+
+# Claims aus Remote (leer = nur KV)
+REMOTE_CLAIMS_URL = ""
+# Für /relay-Require-Creator (optional genutzt)
+CREATOR_PUBKEY = "GEFoNLncuhh4nH99GKvVEUxe59SGe74dbLG7UUtfHrCp"
+# Max ID (0..MAX_INDEX)
+MAX_INDEX = "9999"
+
+# ===== KV-Bindings =====
+# 1) CLAIMS: Beinhaltet Claims + Mint-Registry (mit Prefixen), wie im Code implementiert
+[[kv_namespaces]]
+binding = "CLAIMS"
+id = "139ec0627b02429db4507c14b5a3a1fd"
+
+# 2) VENDOR: Cache für Vendor-Bundles (mpl-token-metadata, web3.js, spl-token)
+[[kv_namespaces]]
+binding = "VENDOR"
+id = "a6bf0aa165cf4be7b2a6621004175315"
