@@ -9,270 +9,22 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   ALLOWED_HEADERS?: string;
 
-  CLAIMS: KVNamespace;
+  CLAIMS: KVNamespace;              // -> Claims + Mint-Registry (mit Prefixen)
   REMOTE_CLAIMS_URL?: string;
 
   CREATOR_PUBKEY?: string;
   MAX_INDEX?: string;
-  
-  VENDOR: KVNamespace;
-}
-// src/index.js
 
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-
-    // CORS
-    const allowOrigins = (env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean);
-    const origin = request.headers.get("Origin") || "";
-    const varyBase = { "Vary": "Origin, Accept-Encoding" };
-    const corsBase = {
-      "Access-Control-Allow-Headers": env.ALLOWED_HEADERS || "content-type",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS,HEAD",
-      "Access-Control-Max-Age": "86400",
-      ...(allowOrigins.includes(origin) ? {"Access-Control-Allow-Origin": origin} : {})
-    };
-    if (request.method === "OPTIONS") {
-      return new Response("ok", { headers: { ...varyBase, ...corsBase } });
-    }
-
-    // ---- Registry routes ----
-    if (path === "/mints" && request.method === "POST") {
-      return handleMintRecordPOST(request, env, corsBase, varyBase);
-    }
-    if (path === "/mints/by-wallet" && request.method === "GET") {
-      return handleMintsByWalletGET(request, env, corsBase, varyBase);
-    }
-    if (path === "/mints/by-id" && request.method === "GET") {
-      return handleMintsByIdGET(request, env, corsBase, varyBase);
-    }
-    if (path === "/mints" && request.method === "GET") {
-      return handleMintsListGET(request, env, corsBase, varyBase);
-    }
-
-    /* ======= Routen: Mint Registry ======= */
-if (url.pathname === '/mints' && req.method === 'POST') {
-  // Body prüfen & speichern
-  type Body = { id?: unknown; mint?: unknown; wallet?: unknown; sig?: unknown };
-  let body: Body;
-  try { body = await readJsonSafe<Body>(req); } catch { return text('Bad JSON or too large', 400); }
-
-  const id = Number(body.id);
-  const mint = String(body.mint || '').trim();
-  const wallet = String(body.wallet || '').trim();
-  const sig = String(body.sig || '').trim();
-
-  if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
-  if (!mint || !wallet || !sig) return json({ error: 'mint/wallet/sig required' }, 400);
-
-  const now = Date.now();
-  const item: MintItem = { id, mint, wallet, sig, ts: now };
-
-  // id darf wiederverwendet werden? => wir überschreiben bewusst (gleiche ID)
-  await putMint(env, item);
-  return json({ ok: true, item });
+  VENDOR: KVNamespace;              // -> Vendor-Bundles (JS/IIFE) Caching
 }
 
-if ((url.pathname === '/mints/by-id') && req.method === 'GET') {
-  const id = Number(url.searchParams.get('id') || '-1');
-  if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
-  const item = await getMintById(env, id);
-  return item ? json({ item }) : json({ error: 'not found' }, 404);
-}
-
-if ((url.pathname === '/mints/by-wallet') && req.method === 'GET') {
-  const wallet = String(url.searchParams.get('wallet') || '').trim();
-  const limit = Number(url.searchParams.get('limit') || '10');
-  const cursor = url.searchParams.get('cursor') || undefined;
-  if (!wallet) return json({ error: 'wallet required' }, 400);
-  const out = await listByWallet(env, wallet, limit, cursor);
-  return json(out);
-}
-
-if ((url.pathname === '/mints/recent' || (url.pathname === '/mints' && req.method === 'GET')) && req.method === 'GET') {
-  // GET /mints → Alias zu /mints/recent
-  const limit = Number(url.searchParams.get('limit') || '50');
-  const cursor = url.searchParams.get('cursor') || undefined;
-  const out = await listMintsRecent(env, limit, cursor);
-  return json(out);
-}
-
-if (url.pathname === '/mints/count' && req.method === 'GET') {
-  const n = Number((await env.CLAIMS.get('mint_count')) || '0');
-  return json({ count: n });
-}
-
-    // … hier laufen deine bestehenden Routen weiter (health, config, rpc, claims, vendor, etc.)
-    // return existingRouter(request, env, ctx);
-
-    return new Response("Not found", { status: 404, headers: { ...varyBase, ...corsBase } });
-  }
-};
-
-
-/** Schema: 
- *  Row = { id:number, mint:string, wallet:string, sig:string, ts:number }
- *  Keys:
- *    MINTS.put(`id:${id}`, JSON)
- *    MINTS.put(`sig:${sig}`, JSON)        // schneller Lookup, optional
- *    MINTS.put(`mint:${mint}`, JSON)      // schneller Lookup, optional
- *    MINTS.put(`wallet:${wallet}:${ts}`, JSON)  // per-wallet Zeitreihe
- */
-/* ======= Mint Registry helpers (KV nutzt dasselbe Namespace: CLAIMS) ======= */
-type MintItem = { id: number; mint: string; wallet: string; sig: string; ts: number };
-
-async function putMint(env: Env, it: MintItem) {
-  // Einzelobjekt
-  await env.CLAIMS.put(`mint:${it.id}`, JSON.stringify(it));
-  // Per Wallet indexieren (Key mit Timestamp für Sortierung)
-  await env.CLAIMS.put(`wallet:${it.wallet}:${it.ts}`, JSON.stringify({ id: it.id, mint: it.mint, sig: it.sig }));
-  // Zähler (best effort)
-  const cur = Number((await env.CLAIMS.get('mint_count')) || '0');
-  await env.CLAIMS.put('mint_count', String(cur + 1));
-}
-
-async function getMintById(env: Env, id: number): Promise<MintItem | null> {
-  const v = await env.CLAIMS.get(`mint:${id}`);
-  return v ? JSON.parse(v) as MintItem : null;
-}
-
-async function listMintsRecent(env: Env, limit = 50, cursor?: string) {
-  // Wir listen alle Schlüssel mit Prefix "mint:" und sortieren absteigend anhand der ID (numerisch).
-  // Da KV.list() alphabetisch sortiert, nutzen wir List+Filter in App – oder (besser) eine zweite Struktur.
-  // Hier: wir listen wallet-agnostisch per Prefix "mint:" und liefern roh zurück; Client kann sortieren.
-  const res = await env.CLAIMS.list({ prefix: 'mint:', limit: Math.min(Math.max(limit, 1), 1000), cursor });
-  const items: MintItem[] = [];
-  for (const k of res.keys) {
-    const v = await env.CLAIMS.get(k.name);
-    if (v) items.push(JSON.parse(v));
-  }
-  // optional absteigend nach ts
-  items.sort((a,b)=> (b.ts||0) - (a.ts||0));
-  return { items, cursor: res.cursor || null, list_complete: res.list_complete === true };
-}
-
-async function listByWallet(env: Env, wallet: string, limit = 10, cursor?: string) {
-  const res = await env.CLAIMS.list({ prefix: `wallet:${wallet}:`, limit: Math.min(Math.max(limit, 1), 1000), cursor });
-  // Werte laden
-  const items: Array<{id:number; mint:string; sig:string; ts:number}> = [];
-  for (const k of res.keys) {
-    const v = await env.CLAIMS.get(k.name);
-    if (!v) continue;
-    const row = JSON.parse(v);
-    // ts steckt im Keyende: wallet:<wallet>:<ts>
-    const tsPart = Number(k.name.split(':').pop() || '0');
-    items.push({ ...row, ts: tsPart });
-  }
-  // absteigend nach ts
-  items.sort((a,b)=> b.ts - a.ts);
-  return { items, cursor: res.cursor || null, list_complete: res.list_complete === true };
-}
-
-async function handleMintRecordPOST(request, env, corsBase, varyBase) {
-  try {
-    const body = await request.json();
-    const id = Number(body?.id);
-    const mint = String(body?.mint || "").trim();
-    const wallet = String(body?.wallet || "").trim();
-    const sig = String(body?.sig || body?.signature || "").trim();
-
-    if (!Number.isInteger(id) || id < 0) throw new Error("invalid id");
-    if (!mint) throw new Error("missing mint");
-    if (!wallet) throw new Error("missing wallet");
-    if (!sig) throw new Error("missing sig");
-
-    const ts = Date.now();
-    const row = { id, mint, wallet, sig, ts };
-
-    // Write primary
-    await env.MINTS.put(`id:${id}`, JSON.stringify(row), { expirationTtl: 60*60*24*365*5 });
-
-    // Secondary indexes (optional, aber praktisch)
-    await env.MINTS.put(`sig:${sig}`, JSON.stringify(row),   { expirationTtl: 60*60*24*365*5 });
-    await env.MINTS.put(`mint:${mint}`, JSON.stringify(row), { expirationTtl: 60*60*24*365*5 });
-
-    // Wallet timeline (Key mit ts für Sortierbarkeit)
-    await env.MINTS.put(`wallet:${wallet}:${ts}`, JSON.stringify(row), { expirationTtl: 60*60*24*365*5 });
-
-    return json({ ok: true }, 200, corsBase, varyBase);
-  } catch (e) {
-    return json({ ok: false, error: String(e?.message||e) }, 400, corsBase, varyBase);
-  }
-}
-
-async function handleMintsByWalletGET(request, env, corsBase, varyBase) {
-  const url = new URL(request.url);
-  const wallet = (url.searchParams.get("wallet") || "").trim();
-  const limit  = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")||"10")));
-  if (!wallet) return json({ items: [] }, 200, corsBase, varyBase);
-
-  // Liste alle Keys wallet:<wallet>:<ts> ab, absteigend
-  const prefix = `wallet:${wallet}:`;
-  // Cloudflare KV list kann nicht wirklich sortiert zurück; wir sammeln und sortieren clientseitig
-  const items = [];
-  let cursor = undefined;
-  do {
-    const page = await env.MINTS.list({ prefix, cursor, limit: 1000 });
-    for (const k of page.keys) {
-      const val = await env.MINTS.get(k.name);
-      if (val) items.push(JSON.parse(val));
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor && items.length < 500); // safety
-
-  items.sort((a,b)=>b.ts - a.ts);
-  return json({ items: items.slice(0, limit) }, 200, corsBase, varyBase);
-}
-
-async function handleMintsByIdGET(request, env, corsBase, varyBase) {
-  const url = new URL(request.url);
-  const id = Number(url.searchParams.get("id") || "-1");
-  if (!Number.isInteger(id) || id < 0) return json({ item: null }, 200, corsBase, varyBase);
-  const val = await env.MINTS.get(`id:${id}`);
-  return json({ item: val ? JSON.parse(val) : null }, 200, corsBase, varyBase);
-}
-
-async function handleMintsListGET(request, env, corsBase, varyBase) {
-  // Kleine Auflistung aller Einträge (teuer). Nur für Admin/Debug gedacht.
-  const url = new URL(request.url);
-  const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit")||"50")));
-  const items = [];
-
-  // Wir listen über das "id:"-Prefix, so haben wir genau 1 Eintrag je ID.
-  let cursor = undefined;
-  do {
-    const page = await env.MINTS.list({ prefix: "id:", cursor, limit: 1000 });
-    for (const k of page.keys) {
-      const val = await env.MINTS.get(k.name);
-      if (val) items.push(JSON.parse(val));
-      if (items.length >= limit) break;
-    }
-    cursor = page.list_complete || items.length >= limit ? undefined : page.cursor;
-  } while (cursor);
-
-  // Nach id sortieren
-  items.sort((a,b)=>a.id - b.id);
-  return json({ items }, 200, corsBase, varyBase);
-}
-
-function json(obj, status, corsBase, varyBase) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: {
-      "content-type": "application/json",
-      ...varyBase, ...corsBase
-    }
-  });
-}
 /* ========================= CORS helpers ========================= */
 const parseList = (s?: string) => (s || '').split(',').map(x => x.trim()).filter(Boolean);
 
 function pickOrigin(req: Request, allow: string[]) {
   const o = req.headers.get('Origin') || '';
   if (!allow.length) return '*';
-  const isAllowed = allow.some(a => {
+  const ok = allow.some(a => {
     if (a === '*') return true;
     if (a.includes('*')) {
       const re = new RegExp('^' + a.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
@@ -280,7 +32,7 @@ function pickOrigin(req: Request, allow: string[]) {
     }
     return a === o;
   });
-  return isAllowed ? (o || allow[0]) : (allow[0] || '*');
+  return ok ? (o || allow[0]) : (allow[0] || '*');
 }
 
 function baseCorsHeaders(origin: string, ctype = 'application/json', extra?: Record<string, string>) {
@@ -289,20 +41,25 @@ function baseCorsHeaders(origin: string, ctype = 'application/json', extra?: Rec
     'Access-Control-Allow-Origin': origin,
     'Vary': 'Origin, Accept-Encoding',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS,HEAD',
-    // Der konkrete Allow-Headers-Wert wird später im fetch() je nach ENV überschrieben:
     'Access-Control-Allow-Headers': 'content-type,solana-client,accept,accept-language',
     'Access-Control-Max-Age': '86400',
     ...(extra || {}),
   };
 }
 
+/* ========================= JSON helpers ========================= */
+const MAX_BODY_BYTES = 512 * 1024;
+async function readJsonSafe<T = any>(req: Request): Promise<T> {
+  const len = Number(req.headers.get('content-length') || 0);
+  if (len && len > MAX_BODY_BYTES) throw new Error('Payload too large');
+  return req.json() as Promise<T>;
+}
+
 /* ========================= RPC forward ========================= */
 const isRetryable = (s: number) => s === 403 || s === 429 || (s >= 500 && s <= 599);
-
 async function rpcOnce(endpoint: string, body: unknown): Promise<Response> {
   return fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 }
-
 async function rpcForward(env: Env, body: unknown): Promise<Response> {
   try {
     const r = await rpcOnce(env.UPSTREAM_RPC, body);
@@ -352,61 +109,11 @@ async function getClaims(env: Env): Promise<number[]> {
   } catch {}
   return [];
 }
-async function serveVendorFromKV(
-  env: Env,
-  key: string,
-  candidates: string[],
-  origin: string
-): Promise<Response> {
-  // 1) aus KV?
-  const cached = await env.VENDOR.get(key, { type: 'arrayBuffer' });
-  if (cached) {
-    return new Response(cached, {
-      status: 200,
-      headers: corsHeaders(origin, 'application/javascript', { 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Vendor-Source': `kv:${key}` })
-    });
-  }
-
-  // 2) sonst versuchen wir Kandidaten zu holen & in KV zu legen
-  const errors: string[] = [];
-  for (const url of candidates) {
-    try {
-      const body = await fetchCached(url);
-      if (body) {
-        // in KV persistieren
-        await env.VENDOR.put(key, new Uint8Array(body) as any);
-        return new Response(body, {
-          status: 200,
-          headers: corsHeaders(origin, 'application/javascript', { 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Vendor-Source': url })
-        });
-      } else {
-        errors.push(`MISS ${url}`);
-      }
-    } catch (e: any) {
-      errors.push(`ERR ${url} :: ${String(e?.message || e)}`);
-    }
-  }
-
-  return new Response('vendor fetch failed', {
-    status: 502,
-    headers: { ...corsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 12).join(' | ') }
-  });
-}
 async function saveClaims(env: Env, arr: number[]) { await env.CLAIMS.put('claimed', JSON.stringify(arr)); }
-
 async function addClaim(env: Env, idx: number): Promise<'created' | 'exists'> {
   const arr = await getClaims(env);
   if (arr.includes(idx)) return 'exists';
   arr.push(idx); await saveClaims(env, arr); return 'created';
-}
-
-/* ========================= Body guard ========================= */
-const MAX_BODY_BYTES = 512 * 1024;
-
-async function readJsonSafe<T = any>(req: Request): Promise<T> {
-  const len = Number(req.headers.get('content-length') || 0);
-  if (len && len > MAX_BODY_BYTES) throw new Error('Payload too large');
-  return req.json() as Promise<T>;
 }
 
 /* ========================= Vendor helper ========================= */
@@ -417,6 +124,93 @@ async function fetchCached(url: string): Promise<ArrayBuffer | null> {
     return await r.arrayBuffer();
   } catch { return null; }
 }
+function corsHeaders(origin: string, ctype = 'application/javascript', extra?: Record<string, string>) {
+  const h = baseCorsHeaders(origin, ctype, extra);
+  return h;
+}
+async function serveVendorFromKV(env: Env, key: string, candidates: string[], origin: string): Promise<Response> {
+  const cached = await env.VENDOR.get(key, { type: 'arrayBuffer' });
+  if (cached) {
+    return new Response(cached, {
+      status: 200,
+      headers: corsHeaders(origin, 'application/javascript', {
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Vendor-Source': `kv:${key}`
+      })
+    });
+  }
+  const errors: string[] = [];
+  for (const url of candidates) {
+    try {
+      const body = await fetchCached(url);
+      if (body) {
+        await env.VENDOR.put(key, body as any); // KV akzeptiert ArrayBuffer
+        return new Response(body, {
+          status: 200,
+          headers: corsHeaders(origin, 'application/javascript', {
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'X-Vendor-Source': url
+          })
+        });
+      } else {
+        errors.push(`MISS ${url}`);
+      }
+    } catch (e: any) {
+      errors.push(`ERR ${url} :: ${String(e?.message || e)}`);
+    }
+  }
+  return new Response('vendor fetch failed', {
+    status: 502,
+    headers: { ...corsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 12).join(' | ') }
+  });
+}
+
+/* ========================= Mint Registry (CLAIMS KV Prefixe) ========================= */
+type MintItem = { id: number; mint: string; wallet: string; sig: string; ts: number };
+
+const PFX_MINT_ID = 'mint:id:';       // -> genau ein Datensatz je ID (überschreiben erlaubt)
+const PFX_WAL = 'mint:wal:';          // -> Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
+const KEY_MINT_COUNT = 'mint_count';  // -> einfacher Zähler (best effort)
+
+async function putMint(env: Env, it: MintItem) {
+  // 1) Primär: je ID genau ein Eintrag (überschreiben erlaubt)
+  await env.CLAIMS.put(PFX_MINT_ID + it.id, JSON.stringify(it), { expirationTtl: 60*60*24*365*10 });
+
+  // 2) Wallet-Timeline (Key mit ts -> später lokal sortieren)
+  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify({ id: it.id, mint: it.mint, sig: it.sig, ts: it.ts }), { expirationTtl: 60*60*24*365*10 });
+
+  // 3) Zähler hochzählen (best effort)
+  const cur = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
+  await env.CLAIMS.put(KEY_MINT_COUNT, String(cur + 1));
+}
+
+async function getMintById(env: Env, id: number): Promise<MintItem | null> {
+  const v = await env.CLAIMS.get(PFX_MINT_ID + id);
+  return v ? JSON.parse(v) as MintItem : null;
+}
+
+async function listByWallet(env: Env, wallet: string, limit = 10, cursor?: string) {
+  const res = await env.CLAIMS.list({ prefix: `${PFX_WAL}${wallet}:`, limit: Math.min(Math.max(limit, 1), 1000), cursor });
+  const items: Array<{id:number; mint:string; sig:string; ts:number}> = [];
+  for (const k of res.keys) {
+    const v = await env.CLAIMS.get(k.name);
+    if (!v) continue;
+    items.push(JSON.parse(v));
+  }
+  items.sort((a,b)=> b.ts - a.ts);
+  return { items, cursor: res.cursor || null, list_complete: res.list_complete === true };
+}
+
+async function listMintsRecent(env: Env, limit = 50, cursor?: string) {
+  const page = await env.CLAIMS.list({ prefix: PFX_MINT_ID, limit: Math.min(Math.max(limit, 1), 1000), cursor });
+  const items: MintItem[] = [];
+  for (const k of page.keys) {
+    const v = await env.CLAIMS.get(k.name);
+    if (v) items.push(JSON.parse(v));
+  }
+  items.sort((a,b)=> (b.ts || 0) - (a.ts || 0));
+  return { items, cursor: page.cursor || null, list_complete: page.list_complete === true };
+}
 
 /* ========================= Worker ========================= */
 export default {
@@ -425,7 +219,7 @@ export default {
     const allow = parseList(env.ALLOWED_ORIGINS) || [];
     const origin = pickOrigin(req, allow);
 
-    // kleine lokale Helfer, damit ALLOWED_HEADERS aus ENV auch wirklich gilt
+    // CORS helpers mit env.ALLOWED_HEADERS
     const cors = (ctype = 'application/json', extra?: Record<string, string>) => {
       const h = baseCorsHeaders(origin, ctype, extra);
       if (env.ALLOWED_HEADERS) h['Access-Control-Allow-Headers'] = env.ALLOWED_HEADERS;
@@ -439,7 +233,7 @@ export default {
     // Preflight
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
 
-    // Health/Info
+    /* -------- Health/Config -------- */
     if (url.pathname === '/' || url.pathname === '/health') return text('OK: inpi-proxy-nft');
     if (url.pathname === '/config') {
       return json({
@@ -454,92 +248,48 @@ export default {
       return json({ now: Date.now(), blockhash_cache: { value: _lastBlockhash, age_ms: Date.now() - _lastBlockTs } });
     }
 
-/* -------- VENDOR: Metaplex mpl-token-metadata (UMD/IIFE Fallbacks) -------- */
-/* -------- VENDOR: Metaplex mpl-token-metadata (UMD/IIFE Fallbacks) -------- */
-if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
-  const candidates = [
-    // 3.x DIST
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
-    // 3.x UMD Ordner
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.3.0/umd/index.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.3.0/umd/index.js',
-  ];
-  return serveVendorFromKV(env, 'mpl-token-metadata-umd.js', candidates, origin);
-}
-
-/* -------- VENDOR: web3.js (IIFE) -------- */
-if (url.pathname === '/vendor/web3js.js') {
-  const candidates = [
-    'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js',
-    'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js',
-    'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.js',
-    'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.js',
-  ];
-  return serveVendorFromKV(env, 'web3.iife.js', candidates, origin);
-}
-
-/* -------- VENDOR: spl-token (IIFE/UMD) -------- */
-if (url.pathname === '/vendor/spl-token.js') {
-  const candidates = [
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.min.js',
-    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.min.js',
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
-    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
-    // Fallbacks
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.3/dist/index.iife.min.js',
-    'https://unpkg.com/@solana/spl-token@0.4.3/dist/index.iife.min.js',
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/umd/index.min.js',
-    'https://unpkg.com/@solana/spl-token@0.4.9/umd/index.min.js',
-  ];
-  return serveVendorFromKV(env, 'spl-token.iife.js', candidates, origin);
-}
-
-/* -------- VENDOR: spl-token (IIFE/UMD Fallbacks) -------- */
-if (url.pathname === '/vendor/spl-token.js') {
-  const candidates = [
-    // 0.4.x Dist
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.min.js',
-    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.min.js',
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
-    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
-
-    // 0.4.3 Fallback
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.3/dist/index.iife.min.js',
-    'https://unpkg.com/@solana/spl-token@0.4.3/dist/index.iife.min.js',
-
-    // alternative Package-Exports (manche Versionen legen UMD unter umd/)
-    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/umd/index.min.js',
-    'https://unpkg.com/@solana/spl-token@0.4.9/umd/index.min.js',
-  ];
-  const errors: string[] = [];
-  for (const s of candidates) {
-    try {
-      const body = await fetchCached(s);
-      if (body) {
-        return new Response(body, {
-          status: 200,
-          headers: {
-            ...corsHeaders(origin, 'application/javascript', { 'Cache-Control': 'public, max-age=86400' }),
-            'X-Vendor-Source': s,
-          },
-        });
-      } else {
-        errors.push(`MISS ${s}`);
-      }
-    } catch (e: any) {
-      errors.push(`ERR  ${s} :: ${String(e?.message || e)}`);
+    /* -------- Vendor: mpl-token-metadata -------- */
+    if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
+      const candidates = [
+        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
+        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
+        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
+        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
+        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
+        // Fallback 3.3.x
+        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
+        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
+      ];
+      return serveVendorFromKV(env, 'mpl-token-metadata-umd.js', candidates, origin);
     }
-  }
-  return new Response('vendor fetch failed', {
-    status: 502,
-    headers: { ...corsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 10).join(' | ') },
-  });
-}
+
+    /* -------- Vendor: web3.js (IIFE) -------- */
+    if (url.pathname === '/vendor/web3js.js') {
+      const candidates = [
+        'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js',
+        'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js',
+        'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.js',
+        'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.js',
+      ];
+      return serveVendorFromKV(env, 'web3.iife.js', candidates, origin);
+    }
+
+    /* -------- Vendor: spl-token (IIFE/UMD) -------- */
+    if (url.pathname === '/vendor/spl-token.js') {
+      const candidates = [
+        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.min.js',
+        'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.min.js',
+        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
+        'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
+        // Fallbacks
+        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.3/dist/index.iife.min.js',
+        'https://unpkg.com/@solana/spl-token@0.4.3/dist/index.iife.min.js',
+        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/umd/index.min.js',
+        'https://unpkg.com/@solana/spl-token@0.4.9/umd/index.min.js',
+      ];
+      return serveVendorFromKV(env, 'spl-token.iife.js', candidates, origin);
+    }
 
     /* -------- JSON-RPC proxy -------- */
     if (url.pathname === '/rpc' && req.method === 'POST') {
@@ -644,6 +394,53 @@ if (url.pathname === '/vendor/spl-token.js') {
       const free: number[] = [];
       for (let i = 0; i <= max; i++) if (!claimed.has(i)) free.push(i);
       return json({ free });
+    }
+
+    /* -------- Mint Registry -------- */
+    if (url.pathname === '/mints' && req.method === 'POST') {
+      type Body = { id?: unknown; mint?: unknown; wallet?: unknown; sig?: unknown };
+      let body: Body;
+      try { body = await readJsonSafe<Body>(req); } catch { return text('Bad JSON or too large', 400); }
+
+      const id = Number(body.id);
+      const mint = String(body.mint || '').trim();
+      const wallet = String(body.wallet || '').trim();
+      const sig = String(body.sig || '').trim();
+
+      if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
+      if (!mint || !wallet || !sig) return json({ error: 'mint/wallet/sig required' }, 400);
+
+      const item: MintItem = { id, mint, wallet, sig, ts: Date.now() };
+      await putMint(env, item);
+      return json({ ok: true, item });
+    }
+
+    if (url.pathname === '/mints/by-id' && req.method === 'GET') {
+      const id = Number(url.searchParams.get('id') || '-1');
+      if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
+      const item = await getMintById(env, id);
+      return item ? json({ item }) : json({ error: 'not found' }, 404);
+    }
+
+    if (url.pathname === '/mints/by-wallet' && req.method === 'GET') {
+      const wallet = String(url.searchParams.get('wallet') || '').trim();
+      const limit = Number(url.searchParams.get('limit') || '10');
+      const cursor = url.searchParams.get('cursor') || undefined;
+      if (!wallet) return json({ error: 'wallet required' }, 400);
+      const out = await listByWallet(env, wallet, limit, cursor);
+      return json(out);
+    }
+
+    if (url.pathname === '/mints' && req.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') || '50');
+      const cursor = url.searchParams.get('cursor') || undefined;
+      const out = await listMintsRecent(env, limit, cursor);
+      return json(out);
+    }
+
+    if (url.pathname === '/mints/count' && req.method === 'GET') {
+      const n = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
+      return json({ count: n });
     }
 
     // 404
