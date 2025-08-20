@@ -22,12 +22,12 @@ id = "139ec0627b02429db4507c14b5a3a1fd"
 # NEU: MINTS-Registry
 [[kv_namespaces]]
 binding = "MINTS"
-id = "<758f0d5b2c9f42ab8f97e662692d5e15>"
+id = "758f0d5b2c9f42ab8f97e662692d5e15"
 
 [[kv_namespaces]]
 binding = "VENDOR"
 # erst in CF-Dashboard anlegen, ID hier eintragen:
-id = "<a6bf0aa165cf4be7b2a6621004175315>"
+id = "a6bf0aa165cf4be7b2a6621004175315"
 
 # ==== Route ====
 routes = [
