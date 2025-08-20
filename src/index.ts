@@ -9,13 +9,13 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   ALLOWED_HEADERS?: string;
 
-  CLAIMS: KVNamespace;              // -> Claims + Mint-Registry (mit Prefixen)
+  CLAIMS: KVNamespace;           // Claims + Mint-Registry (mit Prefixen)
   REMOTE_CLAIMS_URL?: string;
 
   CREATOR_PUBKEY?: string;
   MAX_INDEX?: string;
 
-  VENDOR: KVNamespace;              // -> Vendor-Bundles (JS/IIFE) Caching
+  VENDOR: KVNamespace;           // Vendor-Bundles (JS/IIFE) Caching
 }
 
 /* ========================= CORS helpers ========================= */
@@ -124,16 +124,13 @@ async function fetchCached(url: string): Promise<ArrayBuffer | null> {
     return await r.arrayBuffer();
   } catch { return null; }
 }
-function corsHeaders(origin: string, ctype = 'application/javascript', extra?: Record<string, string>) {
-  const h = baseCorsHeaders(origin, ctype, extra);
-  return h;
-}
+
 async function serveVendorFromKV(env: Env, key: string, candidates: string[], origin: string): Promise<Response> {
   const cached = await env.VENDOR.get(key, { type: 'arrayBuffer' });
   if (cached) {
     return new Response(cached, {
       status: 200,
-      headers: corsHeaders(origin, 'application/javascript', {
+      headers: baseCorsHeaders(origin, 'application/javascript', {
         'Cache-Control': 'public, max-age=31536000, immutable',
         'X-Vendor-Source': `kv:${key}`
       })
@@ -144,10 +141,11 @@ async function serveVendorFromKV(env: Env, key: string, candidates: string[], or
     try {
       const body = await fetchCached(url);
       if (body) {
-        await env.VENDOR.put(key, body as any); // KV akzeptiert ArrayBuffer
+        // In KV persistieren (ArrayBuffer wird akzeptiert)
+        await env.VENDOR.put(key, body as any);
         return new Response(body, {
           status: 200,
-          headers: corsHeaders(origin, 'application/javascript', {
+          headers: baseCorsHeaders(origin, 'application/javascript', {
             'Cache-Control': 'public, max-age=31536000, immutable',
             'X-Vendor-Source': url
           })
@@ -161,25 +159,20 @@ async function serveVendorFromKV(env: Env, key: string, candidates: string[], or
   }
   return new Response('vendor fetch failed', {
     status: 502,
-    headers: { ...corsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 12).join(' | ') }
+    headers: { ...baseCorsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 12).join(' | ') }
   });
 }
 
 /* ========================= Mint Registry (CLAIMS KV Prefixe) ========================= */
 type MintItem = { id: number; mint: string; wallet: string; sig: string; ts: number };
 
-const PFX_MINT_ID = 'mint:id:';       // -> genau ein Datensatz je ID (überschreiben erlaubt)
-const PFX_WAL = 'mint:wal:';          // -> Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
-const KEY_MINT_COUNT = 'mint_count';  // -> einfacher Zähler (best effort)
+const PFX_MINT_ID = 'mint:id:';         // genau 1 Datensatz je ID
+const PFX_WAL     = 'mint:wal:';        // Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
+const KEY_MINT_COUNT = 'mint_count';    // einfacher Zähler
 
 async function putMint(env: Env, it: MintItem) {
-  // 1) Primär: je ID genau ein Eintrag (überschreiben erlaubt)
-  await env.CLAIMS.put(PFX_MINT_ID + it.id, JSON.stringify(it), { expirationTtl: 60*60*24*365*10 });
-
-  // 2) Wallet-Timeline (Key mit ts -> später lokal sortieren)
-  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify({ id: it.id, mint: it.mint, sig: it.sig, ts: it.ts }), { expirationTtl: 60*60*24*365*10 });
-
-  // 3) Zähler hochzählen (best effort)
+  await env.CLAIMS.put(PFX_MINT_ID + it.id, JSON.stringify(it), { expirationTtl: 60 * 60 * 24 * 365 * 10 });
+  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify({ id: it.id, mint: it.mint, sig: it.sig, ts: it.ts }), { expirationTtl: 60 * 60 * 24 * 365 * 10 });
   const cur = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
   await env.CLAIMS.put(KEY_MINT_COUNT, String(cur + 1));
 }
@@ -191,13 +184,13 @@ async function getMintById(env: Env, id: number): Promise<MintItem | null> {
 
 async function listByWallet(env: Env, wallet: string, limit = 10, cursor?: string) {
   const res = await env.CLAIMS.list({ prefix: `${PFX_WAL}${wallet}:`, limit: Math.min(Math.max(limit, 1), 1000), cursor });
-  const items: Array<{id:number; mint:string; sig:string; ts:number}> = [];
+  const items: Array<{ id: number; mint: string; sig: string; ts: number }> = [];
   for (const k of res.keys) {
     const v = await env.CLAIMS.get(k.name);
     if (!v) continue;
     items.push(JSON.parse(v));
   }
-  items.sort((a,b)=> b.ts - a.ts);
+  items.sort((a, b) => b.ts - a.ts);
   return { items, cursor: res.cursor || null, list_complete: res.list_complete === true };
 }
 
@@ -208,7 +201,7 @@ async function listMintsRecent(env: Env, limit = 50, cursor?: string) {
     const v = await env.CLAIMS.get(k.name);
     if (v) items.push(JSON.parse(v));
   }
-  items.sort((a,b)=> (b.ts || 0) - (a.ts || 0));
+  items.sort((a, b) => (b.ts || 0) - (a.ts || 0));
   return { items, cursor: page.cursor || null, list_complete: page.list_complete === true };
 }
 
@@ -219,7 +212,7 @@ export default {
     const allow = parseList(env.ALLOWED_ORIGINS) || [];
     const origin = pickOrigin(req, allow);
 
-    // CORS helpers mit env.ALLOWED_HEADERS
+    // CORS helpers (ALLOWED_HEADERS aus ENV respektieren)
     const cors = (ctype = 'application/json', extra?: Record<string, string>) => {
       const h = baseCorsHeaders(origin, ctype, extra);
       if (env.ALLOWED_HEADERS) h['Access-Control-Allow-Headers'] = env.ALLOWED_HEADERS;
