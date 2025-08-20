@@ -286,7 +286,20 @@ export default {
       for (let i = 0; i <= max; i++) if (!claimed.has(i)) free.push(i);
       return json({ free }, origin);
     }
-
+    if (url.pathname === '/vendor/web3js.js') {
+  const srcs = [
+    'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js',
+    'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js',
+      ];
+      // ... analog zum vorhandenen vendor-Block
+    }
+    if (url.pathname === '/vendor/spl-token.js') {
+      const srcs = [
+        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
+        'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
+      ];
+      // ... analog
+    }
     // 404
     return text('Not found', origin, 404);
   }
