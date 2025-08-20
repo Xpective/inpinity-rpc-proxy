@@ -22,7 +22,7 @@ id = "139ec0627b02429db4507c14b5a3a1fd"
 # NEU: MINTS-Registry
 [[kv_namespaces]]
 binding = "MINTS"
-id = "<139ec0627b02429db4507c14b5a3a1fd>"
+id = "<758f0d5b2c9f42ab8f97e662692d5e15>"
 
 [[kv_namespaces]]
 binding = "VENDOR"
