@@ -17,7 +17,154 @@ export interface Env {
   
   VENDOR: KVNamespace;
 }
+// src/index.js
 
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // CORS
+    const allowOrigins = (env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean);
+    const origin = request.headers.get("Origin") || "";
+    const varyBase = { "Vary": "Origin, Accept-Encoding" };
+    const corsBase = {
+      "Access-Control-Allow-Headers": env.ALLOWED_HEADERS || "content-type",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS,HEAD",
+      "Access-Control-Max-Age": "86400",
+      ...(allowOrigins.includes(origin) ? {"Access-Control-Allow-Origin": origin} : {})
+    };
+    if (request.method === "OPTIONS") {
+      return new Response("ok", { headers: { ...varyBase, ...corsBase } });
+    }
+
+    // ---- Registry routes ----
+    if (path === "/mints" && request.method === "POST") {
+      return handleMintRecordPOST(request, env, corsBase, varyBase);
+    }
+    if (path === "/mints/by-wallet" && request.method === "GET") {
+      return handleMintsByWalletGET(request, env, corsBase, varyBase);
+    }
+    if (path === "/mints/by-id" && request.method === "GET") {
+      return handleMintsByIdGET(request, env, corsBase, varyBase);
+    }
+    if (path === "/mints" && request.method === "GET") {
+      return handleMintsListGET(request, env, corsBase, varyBase);
+    }
+
+    // … hier laufen deine bestehenden Routen weiter (health, config, rpc, claims, vendor, etc.)
+    // return existingRouter(request, env, ctx);
+
+    return new Response("Not found", { status: 404, headers: { ...varyBase, ...corsBase } });
+  }
+};
+
+
+/** Schema: 
+ *  Row = { id:number, mint:string, wallet:string, sig:string, ts:number }
+ *  Keys:
+ *    MINTS.put(`id:${id}`, JSON)
+ *    MINTS.put(`sig:${sig}`, JSON)        // schneller Lookup, optional
+ *    MINTS.put(`mint:${mint}`, JSON)      // schneller Lookup, optional
+ *    MINTS.put(`wallet:${wallet}:${ts}`, JSON)  // per-wallet Zeitreihe
+ */
+
+async function handleMintRecordPOST(request, env, corsBase, varyBase) {
+  try {
+    const body = await request.json();
+    const id = Number(body?.id);
+    const mint = String(body?.mint || "").trim();
+    const wallet = String(body?.wallet || "").trim();
+    const sig = String(body?.sig || body?.signature || "").trim();
+
+    if (!Number.isInteger(id) || id < 0) throw new Error("invalid id");
+    if (!mint) throw new Error("missing mint");
+    if (!wallet) throw new Error("missing wallet");
+    if (!sig) throw new Error("missing sig");
+
+    const ts = Date.now();
+    const row = { id, mint, wallet, sig, ts };
+
+    // Write primary
+    await env.MINTS.put(`id:${id}`, JSON.stringify(row), { expirationTtl: 60*60*24*365*5 });
+
+    // Secondary indexes (optional, aber praktisch)
+    await env.MINTS.put(`sig:${sig}`, JSON.stringify(row),   { expirationTtl: 60*60*24*365*5 });
+    await env.MINTS.put(`mint:${mint}`, JSON.stringify(row), { expirationTtl: 60*60*24*365*5 });
+
+    // Wallet timeline (Key mit ts für Sortierbarkeit)
+    await env.MINTS.put(`wallet:${wallet}:${ts}`, JSON.stringify(row), { expirationTtl: 60*60*24*365*5 });
+
+    return json({ ok: true }, 200, corsBase, varyBase);
+  } catch (e) {
+    return json({ ok: false, error: String(e?.message||e) }, 400, corsBase, varyBase);
+  }
+}
+
+async function handleMintsByWalletGET(request, env, corsBase, varyBase) {
+  const url = new URL(request.url);
+  const wallet = (url.searchParams.get("wallet") || "").trim();
+  const limit  = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")||"10")));
+  if (!wallet) return json({ items: [] }, 200, corsBase, varyBase);
+
+  // Liste alle Keys wallet:<wallet>:<ts> ab, absteigend
+  const prefix = `wallet:${wallet}:`;
+  // Cloudflare KV list kann nicht wirklich sortiert zurück; wir sammeln und sortieren clientseitig
+  const items = [];
+  let cursor = undefined;
+  do {
+    const page = await env.MINTS.list({ prefix, cursor, limit: 1000 });
+    for (const k of page.keys) {
+      const val = await env.MINTS.get(k.name);
+      if (val) items.push(JSON.parse(val));
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor && items.length < 500); // safety
+
+  items.sort((a,b)=>b.ts - a.ts);
+  return json({ items: items.slice(0, limit) }, 200, corsBase, varyBase);
+}
+
+async function handleMintsByIdGET(request, env, corsBase, varyBase) {
+  const url = new URL(request.url);
+  const id = Number(url.searchParams.get("id") || "-1");
+  if (!Number.isInteger(id) || id < 0) return json({ item: null }, 200, corsBase, varyBase);
+  const val = await env.MINTS.get(`id:${id}`);
+  return json({ item: val ? JSON.parse(val) : null }, 200, corsBase, varyBase);
+}
+
+async function handleMintsListGET(request, env, corsBase, varyBase) {
+  // Kleine Auflistung aller Einträge (teuer). Nur für Admin/Debug gedacht.
+  const url = new URL(request.url);
+  const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit")||"50")));
+  const items = [];
+
+  // Wir listen über das "id:"-Prefix, so haben wir genau 1 Eintrag je ID.
+  let cursor = undefined;
+  do {
+    const page = await env.MINTS.list({ prefix: "id:", cursor, limit: 1000 });
+    for (const k of page.keys) {
+      const val = await env.MINTS.get(k.name);
+      if (val) items.push(JSON.parse(val));
+      if (items.length >= limit) break;
+    }
+    cursor = page.list_complete || items.length >= limit ? undefined : page.cursor;
+  } while (cursor);
+
+  // Nach id sortieren
+  items.sort((a,b)=>a.id - b.id);
+  return json({ items }, 200, corsBase, varyBase);
+}
+
+function json(obj, status, corsBase, varyBase) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      ...varyBase, ...corsBase
+    }
+  });
+}
 /* ========================= CORS helpers ========================= */
 const parseList = (s?: string) => (s || '').split(',').map(x => x.trim()).filter(Boolean);
 
