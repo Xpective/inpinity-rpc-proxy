@@ -207,53 +207,21 @@ export default {
     }
 
 /* -------- VENDOR: Metaplex mpl-token-metadata (UMD/IIFE Fallbacks) -------- */
+/* -------- VENDOR: Metaplex mpl-token-metadata (UMD/IIFE Fallbacks) -------- */
 if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
   const candidates = [
-    // 3.x Dist (häufigster aktueller Buildname)
+    // 3.x DIST
     'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
     'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
     'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
     'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
-
-    // 3.x alternative Ordnerstruktur (manche Releases packen es unter umd/)
+    // 3.x UMD Ordner
     'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
     'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.min.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.min.js',
-
-    // weitere 3.x Fallbacks
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.2.0/umd/index.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.2.0/umd/index.js',
-
-    // absoluter Notnagel: ein gebündeltes Browser-Build (falls vorhanden)
-    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/browser.js',
-    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/browser.js',
+    'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.3.0/umd/index.js',
+    'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.3.0/umd/index.js',
   ];
-  const errors: string[] = [];
-  for (const s of candidates) {
-    try {
-      const body = await fetchCached(s);
-      if (body) {
-        return new Response(body, {
-          status: 200,
-          headers: {
-            ...corsHeaders(origin, 'application/javascript', { 'Cache-Control': 'public, max-age=86400' }),
-            'X-Vendor-Source': s,
-          },
-        });
-      } else {
-        errors.push(`MISS ${s}`);
-      }
-    } catch (e: any) {
-      errors.push(`ERR  ${s} :: ${String(e?.message || e)}`);
-    }
-  }
-  return new Response('vendor fetch failed', {
-    status: 502,
-    headers: { ...corsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 10).join(' | ') },
-  });
+  return serveVendorFromKV(env, 'mpl-token-metadata-umd.js', candidates, origin);
 }
 
 /* -------- VENDOR: web3.js (IIFE) -------- */
@@ -264,29 +232,23 @@ if (url.pathname === '/vendor/web3js.js') {
     'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.js',
     'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.js',
   ];
-  const errors: string[] = [];
-  for (const s of candidates) {
-    try {
-      const body = await fetchCached(s);
-      if (body) {
-        return new Response(body, {
-          status: 200,
-          headers: {
-            ...corsHeaders(origin, 'application/javascript', { 'Cache-Control': 'public, max-age=86400' }),
-            'X-Vendor-Source': s,
-          },
-        });
-      } else {
-        errors.push(`MISS ${s}`);
-      }
-    } catch (e: any) {
-      errors.push(`ERR  ${s} :: ${String(e?.message || e)}`);
-    }
-  }
-  return new Response('vendor fetch failed', {
-    status: 502,
-    headers: { ...corsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 10).join(' | ') },
-  });
+  return serveVendorFromKV(env, 'web3.iife.js', candidates, origin);
+}
+
+/* -------- VENDOR: spl-token (IIFE/UMD) -------- */
+if (url.pathname === '/vendor/spl-token.js') {
+  const candidates = [
+    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.min.js',
+    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.min.js',
+    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
+    'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
+    // Fallbacks
+    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.3/dist/index.iife.min.js',
+    'https://unpkg.com/@solana/spl-token@0.4.3/dist/index.iife.min.js',
+    'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/umd/index.min.js',
+    'https://unpkg.com/@solana/spl-token@0.4.9/umd/index.min.js',
+  ];
+  return serveVendorFromKV(env, 'spl-token.iife.js', candidates, origin);
 }
 
 /* -------- VENDOR: spl-token (IIFE/UMD Fallbacks) -------- */
