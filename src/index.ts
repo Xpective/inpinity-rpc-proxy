@@ -151,7 +151,37 @@ async function listAllKeys(kv: KVNamespace, prefix: string, limit = 1000) {
 
   return keys;
 }
+declare global { interface Env { HMAC_SECRET: string } }
 
+async function hmacValid(env: Env, body: string, sig: string | null) {
+  if (!env.HMAC_SECRET) return true; // falls du es optional lassen willst
+  if (!sig) return false;
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(env.HMAC_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]
+  );
+  const mac = await crypto.subtle.sign("HMAC", key, enc.encode(body));
+  const hex = Array.from(new Uint8Array(mac)).map(b => b.toString(16).padStart(2,"0")).join("");
+  // akzeptiere hex oder "sha256=..."-Format
+  return sig === hex || sig === `sha256=${hex}`;
+}
+async function rateLimit(kv: KVNamespace, ip: string, bucket = "rl", limit = 60, windowSec = 60) {
+  const key = `${bucket}:${ip}:${Math.floor(Date.now()/ (windowSec*1000))}`;
+  const cur = Number(await kv.get(key)) || 0;
+  if (cur >= limit) return false;
+  await kv.put(key, String(cur + 1), { expirationTtl: windowSec + 5 });
+  return true;
+}
+
+// vor schreibenden Endpoints:
+const ip = req.headers.get("cf-connecting-ip") || "0.0.0.0";
+if (!(await rateLimit(env.CLAIMS, ip))) return new Response("rate limit", { status: 429 });
+// in handleMints (POST /mints) ganz oben:
+if (method === "POST" && pathname === "/mints") {
+  const raw = await req.text();
+  const ok = await hmacValid(env, raw, req.headers.get("X-Signature"));
+  if (!ok) return json({ ok: false, error: "bad signature" }, 401);
+  const j = JSON.parse(raw);
 async function handleMints(req: Request, env: Env, url: URL): Promise<Response> {
   const method = req.method;
   const pathname = url.pathname;
@@ -239,34 +269,43 @@ async function handleMints(req: Request, env: Env, url: URL): Promise<Response> 
 
 /* -------------- Claims -------------- */
 async function handleClaims(req: Request, env: Env, url: URL): Promise<Response> {
-  // GET /claims  -> liefert NUR ein Array [0,2,999,...]  (damit app.js Fast-Path greift)
   if (req.method === "GET") {
-    const keys = await listAllKeys(env.CLAIMS, "claim:", 2000);
+    // wie gehabt: nacktes Array – aber effizienter mit Cursor:
     const out: number[] = [];
-    for (const k of keys) {
-      // Schlüssel-Format: claim:<id>
-      const parts = k.split(":");
-      const id = Number(parts[1] || "-1");
-      if (Number.isInteger(id) && id >= 0) out.push(id);
-    }
+    let cursor: string | undefined = undefined;
+    do {
+      const page = await env.CLAIMS.list({ prefix: "claim:", limit: 1000, cursor });
+      for (const k of page.keys) {
+        const id = Number(k.name.split(":")[1] || "-1");
+        if (Number.isInteger(id) && id >= 0) out.push(id);
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
     out.sort((a, b) => a - b);
-    return json(out); // <- nacktes Array!
+    // ETag
+    const tag = `"c-${out.length}-${out[0] ?? 0}-${out[out.length-1] ?? 0}"`;
+    if (req.headers.get("If-None-Match") === tag) return new Response(null, { status: 304 });
+    return new Response(JSON.stringify(out), {
+      status: 200,
+      headers: { "content-type":"application/json; charset=utf-8", "ETag": tag }
+    });
   }
 
-  // POST /claims { index: number }
   if (req.method === "POST") {
     const j = await readJson<{ index: number }>(req);
     const i = Number(j?.index ?? -1);
-    if (!Number.isInteger(i) || i < 0) return new Response("bad index", { status: 400 });
+    const max = parseMaxIndex(env);
+    if (!Number.isInteger(i) || i < 0 || i > max) return new Response("bad index", { status: 400 });
 
-    const maxIndex = parseMaxIndex(env);
-    if (i > maxIndex) return new Response("index out of range", { status: 400 });
+    // 1) DO-Lock (atomar)
+    const id = env.MINT_GUARD.idFromName(`claim:${i}`);
+    const stub = env.MINT_GUARD.get(id);
+    const lockRes = await stub.fetch("https://do/lock", { method: "POST" });
+    if (lockRes.status === 409) return new Response(null, { status: 409 });
 
-    const key = `claim:${i}`;
-    const existed = await env.CLAIMS.get(key);
-    if (existed) return new Response(null, { status: 409 });
+    // 2) KV-Index für schnelles GET /claims
+    await env.CLAIMS.put(`claim:${i}`, "1");
 
-    await env.CLAIMS.put(key, "1");
     return new Response(null, { status: 200 });
   }
 
@@ -296,7 +335,33 @@ async function handleRpc(req: Request, env: Env): Promise<Response> {
   }
   return json({ error: "rpc unavailable" }, 502);
 }
+export class MintGuard {
+  private state: DurableObjectState;
+  constructor(state: DurableObjectState, _env: Env) { this.state = state; }
 
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    const method = req.method;
+
+    // Der Name des DO ist "claim:<index>" (idFromName in Router)
+    // Wir speichern nur ein Flag "claimed" = 1.
+    if (method === "POST" && url.pathname === "/lock") {
+      const existed = await this.state.storage.get<number>("claimed");
+      if (existed === 1) return new Response(null, { status: 409 });
+      await this.state.storage.put("claimed", 1);
+      return new Response(null, { status: 200 });
+    }
+
+    if (method === "GET" && url.pathname === "/status") {
+      const existed = await this.state.storage.get<number>("claimed");
+      return new Response(JSON.stringify({ claimed: existed === 1 }), {
+        headers: { "content-type": "application/json" }
+      });
+    }
+
+    return new Response("not found", { status: 404 });
+  }
+}
 /* -------------- Router -------------- */
 export default {
   async fetch(req, env): Promise<Response> {
@@ -332,4 +397,38 @@ export default {
     // Default
     return wrap(new Response("ok"), req);
   }
+  function securityHeaders(res: Response) {
+  const h = new Headers(res.headers);
+  h.set("Referrer-Policy", "no-referrer");
+  h.set("X-Content-Type-Options", "nosniff");
+  h.set("X-Frame-Options", "DENY");
+  h.set("Permissions-Policy", "geolocation=(), payment=()");
+  h.set("Content-Security-Policy",
+    "default-src 'none'; img-src https: data:; media-src https:; connect-src https:; script-src 'none'; style-src 'none';");
+  return new Response(res.body, { status: res.status, headers: h });
+}
+async function handleStats(env: Env): Promise<Response> {
+  let total = 0, first = 0, last = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await env.CLAIMS.list({ prefix: "mints:feed:", limit: 1000, cursor });
+    total += page.keys.length;
+    if (page.keys.length) {
+      const tsFirst = Number(page.keys[0].name.split(":")[2] || "0");
+      const tsLast  = Number(page.keys[page.keys.length-1].name.split(":")[2] || "0");
+      first = first ? Math.min(first, tsFirst) : tsFirst;
+      last = Math.max(last, tsLast);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  const max = parseMaxIndex(env);
+  const claimedKeys = await env.CLAIMS.list({ prefix: "claim:", limit: 1 });
+  // schneller Count (ungefähr): hole nur Cursor, dann iterativ – hier simpel:
+  const claimedAll = await listAllKeys(env.CLAIMS, "claim:", 1000);
+  const claimed = claimedAll.length;
+
+  return json({ minted_feed: total, claimed, remaining: (max+1) - claimed, first, last });
+}
+// im Router ganz unten: return securityHeaders(wrap(response, req));
 } satisfies ExportedHandler<Env>;
