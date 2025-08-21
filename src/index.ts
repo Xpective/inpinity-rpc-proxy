@@ -1,172 +1,86 @@
-// src/index.ts
-import type { KVNamespace, RequestInitCfProperties } from '@cloudflare/workers-types';
+// src/index.ts  (Minimal, klammert sicher korrekt)
 
-/* ========================= ENV ========================= */
 export interface Env {
-  UPSTREAM_RPC: string;
-  BACKUP_RPC?: string;
-
-  ALLOWED_ORIGINS?: string;
-  ALLOWED_HEADERS?: string;
-
-  CLAIMS: KVNamespace;           // Claims + Mint-Registry (mit Prefixen)
-  REMOTE_CLAIMS_URL?: string;
-
-  CREATOR_PUBKEY?: string;
-  MAX_INDEX?: string;
-
-  VENDOR: KVNamespace;           // Vendor-Bundles (JS/IIFE) Caching
+  VENDOR: KVNamespace;     // KV für vendor Bundles
+  CLAIMS: KVNamespace;     // KV für claims + mints
+  UPSTREAM_RPC: string;    // "https://api.mainnet-beta.solana.com"
+  BACKUP_RPC: string;      // "https://solana.publicnode.com"
+  ALLOWED_ORIGINS: string; // CSV Domains
+  ALLOWED_HEADERS: string; // CSV Header
+  CREATOR_PUBKEY: string;  // Base58
+  MAX_INDEX: string;       // z.B. "9999"
 }
 
-/* ========================= CORS helpers ========================= */
-const parseList = (s?: string) => (s || '').split(',').map(x => x.trim()).filter(Boolean);
-
-function pickOrigin(req: Request, allow: string[]) {
-  const o = req.headers.get('Origin') || '';
-  if (!allow.length) return '*';
-  const ok = allow.some(a => {
-    if (a === '*') return true;
-    if (a.includes('*')) {
-      const re = new RegExp('^' + a.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
-      return re.test(o);
-    }
-    return a === o;
-  });
-  return ok ? (o || allow[0]) : (allow[0] || '*');
-}
-
-function baseCorsHeaders(origin: string, ctype = 'application/json', extra?: Record<string, string>) {
+function cors(env: Env) {
+  const origins = (env.ALLOWED_ORIGINS || "").split(",").map(s=>s.trim()).filter(Boolean);
+  const headers = (env.ALLOWED_HEADERS || "content-type,accept").split(",").map(s=>s.trim());
   return {
-    'Content-Type': ctype,
-    'Access-Control-Allow-Origin': origin,
-    'Vary': 'Origin, Accept-Encoding',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS,HEAD',
-    'Access-Control-Allow-Headers': 'content-type,solana-client,accept,accept-language',
-    'Access-Control-Max-Age': '86400',
-    ...(extra || {}),
+    preflight(req: Request) {
+      if (req.method !== "OPTIONS") return null;
+      const origin = req.headers.get("Origin") || "";
+      const allow = origins.length===0 || origins.includes(origin) ? origin : origins[0] || "*";
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": allow,
+          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+          "Access-Control-Allow-Headers": headers.join(","),
+          "Vary": "Origin"
+        }
+      });
+    },
+    wrap(res: Response, req: Request) {
+      const origin = req.headers.get("Origin") || "";
+      const allow = origins.length===0 || origins.includes(origin) ? origin : origins[0] || "*";
+      const h = new Headers(res.headers);
+      h.set("Access-Control-Allow-Origin", allow);
+      h.append("Vary","Origin");
+      return new Response(res.body, { status: res.status, headers: h });
+    }
   };
 }
 
-/* ========================= JSON helpers ========================= */
-const MAX_BODY_BYTES = 512 * 1024;
-async function readJsonSafe<T = any>(req: Request): Promise<T> {
-  const len = Number(req.headers.get('content-length') || 0);
-  if (len && len > MAX_BODY_BYTES) throw new Error('Payload too large');
-  return req.json() as Promise<T>;
-}
+// ---------- /vendor/mpl-token-metadata-umd.js ----------
+async function handleVendor(path: string, env: Env): Promise<Response> {
+  const key = path.replace(/^\/vendor\//, "");
+  if (!key) return new Response("missing key", { status: 400 });
 
-/* ========================= RPC forward ========================= */
-const isRetryable = (s: number) => s === 403 || s === 429 || (s >= 500 && s <= 599);
-async function rpcOnce(endpoint: string, body: unknown): Promise<Response> {
-  return fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-}
-async function rpcForward(env: Env, body: unknown): Promise<Response> {
-  try {
-    const r = await rpcOnce(env.UPSTREAM_RPC, body);
-    if (!isRetryable(r.status)) return r;
-  } catch {}
-  if (env.BACKUP_RPC) {
-    try { return await rpcOnce(env.BACKUP_RPC, body); } catch { return new Response('UPSTREAM+BACKUP error', { status: 599 }); }
-  }
-  return new Response('UPSTREAM error', { status: 599 });
-}
-
-/* ========================= Blockhash mini cache ========================= */
-let _lastBlockhash = '';
-let _lastBlockTs = 0;
-const BLOCKHASH_TTL_MS = 10_000;
-
-async function getLatestBlockhash(env: Env): Promise<string> {
-  const now = Date.now();
-  if (_lastBlockhash && now - _lastBlockTs < BLOCKHASH_TTL_MS) return _lastBlockhash;
-  const body = { jsonrpc: '2.0', id: 1, method: 'getLatestBlockhash', params: [{ commitment: 'finalized' }] };
-  const r = await rpcForward(env, body);
-  if (!r.ok) throw new Error(`RPC ${r.status}`);
-  const j = await r.json();
-  const bh = j?.result?.value?.blockhash || j?.result?.blockhash;
-  if (!bh) throw new Error('No blockhash');
-  _lastBlockhash = bh; _lastBlockTs = now; return bh;
-}
-
-/* ========================= Claims (KV + optional remote) ========================= */
-async function getClaims(env: Env): Promise<number[]> {
-  if (env.REMOTE_CLAIMS_URL) {
-    try {
-      const r = await fetch(env.REMOTE_CLAIMS_URL, { cf: { cacheTtl: 60, cacheEverything: true } as RequestInitCfProperties } as RequestInit);
-      if (r.ok) {
-        const d = await r.json();
-        if (Array.isArray(d)) return d;
-        if (Array.isArray((d as any)?.claimed)) return (d as any).claimed;
-      }
-    } catch {}
-  }
-  const raw = await env.CLAIMS.get('claimed');
-  if (!raw) return [];
-  try {
-    const j = JSON.parse(raw);
-    if (Array.isArray(j)) return j;
-    if (Array.isArray((j as any)?.claimed)) return (j as any).claimed;
-  } catch {}
-  return [];
-}
-async function saveClaims(env: Env, arr: number[]) { await env.CLAIMS.put('claimed', JSON.stringify(arr)); }
-async function addClaim(env: Env, idx: number): Promise<'created' | 'exists'> {
-  const arr = await getClaims(env);
-  if (arr.includes(idx)) return 'exists';
-  arr.push(idx); await saveClaims(env, arr); return 'created';
-}
-
-/* ========================= Vendor helper ========================= */
-async function fetchCached(url: string): Promise<ArrayBuffer | null> {
-  try {
-    const r = await fetch(url, { cf: { cacheTtl: 86400, cacheEverything: true } as RequestInitCfProperties } as RequestInit);
-    if (!r.ok) return null;
-    return await r.arrayBuffer();
-  } catch { return null; }
-}
-
-async function serveVendorFromKV(env: Env, key: string, candidates: string[], origin: string): Promise<Response> {
-  const cached = await env.VENDOR.get(key, { type: 'arrayBuffer' });
-  if (cached) {
-    return new Response(cached, {
-      status: 200,
-      headers: baseCorsHeaders(origin, 'application/javascript', {
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Vendor-Source': `kv:${key}`
-      })
+  // 1) Versuche aus KV
+  const fromKv = await env.VENDOR.get(key, { type: "stream" });
+  if (fromKv) {
+    return new Response(fromKv, {
+      headers: { "content-type":"application/javascript; charset=utf-8", "X-Vendor-Source": `kv:${key}` }
     });
   }
-  const errors: string[] = [];
+
+  // 2) Hole von CDN (einmalig), speichere in KV
+  const candidates = [
+    "https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js",
+    "https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js",
+    "https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js",
+    "https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js"
+  ];
+  let lastErr: any = null;
   for (const url of candidates) {
     try {
-      const body = await fetchCached(url);
-      if (body) {
-        await env.VENDOR.put(key, body as any);
-        return new Response(body, {
-          status: 200,
-          headers: baseCorsHeaders(origin, 'application/javascript', {
-            'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Vendor-Source': url
-          })
-        });
-      } else {
-        errors.push(`MISS ${url}`);
-      }
-    } catch (e: any) {
-      errors.push(`ERR ${url} :: ${String(e?.message || e)}`);
+      const r = await fetch(url, { cf: { cacheTtl: 3600 } });
+      if (!r.ok) throw new Error(`fetch ${url} -> ${r.status}`);
+      const buf = await r.arrayBuffer();
+      await env.VENDOR.put(key, buf as unknown as ReadableStream, { expirationTtl: 60 * 60 * 24 * 7 }); // 7 Tage
+      return new Response(buf, {
+        headers: { "content-type":"application/javascript; charset=utf-8", "X-Vendor-Source": `cdn:${url}` }
+      });
+    } catch (e) {
+      lastErr = e;
     }
   }
-  return new Response('vendor fetch failed', {
-    status: 502,
-    headers: { ...baseCorsHeaders(origin, 'text/plain'), 'X-Vendor-Errors': errors.slice(0, 12).join(' | ') }
-  });
+  return new Response(`vendor fetch failed: ${String(lastErr?.message || lastErr)}`, { status: 502 });
 }
 
-/* ========================= Mint Registry (CLAIMS KV Prefixe) ========================= */
-type MintItem = {
+// ---------- /mints (POST), /mints/by-id, /mints/by-wallet, /mints, /mints/count ----------
+type MintRow = {
   id: number;
   mint: string;
-  wallet: string;
+  wallet?: string;
   sig: string;
   ts: number;
   collection?: string;
@@ -174,299 +88,138 @@ type MintItem = {
   uri?: string;
 };
 
-const PFX_MINT_ID   = 'mint:id:';      // 1 Datensatz je Token-ID
-const PFX_WAL       = 'mint:wal:';     // Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
-const KEY_MINT_COUNT = 'mint_count';   // Zähler
+async function handleMints(req: Request, env: Env, url: URL): Promise<Response> {
+  const method = req.method;
+  const pathname = url.pathname;
 
-async function putMint(env: Env, it: MintItem) {
-  // Vollobjekt für Nachschlagen per ID
-  await env.CLAIMS.put(PFX_MINT_ID + it.id, JSON.stringify(it), {
-    expirationTtl: 60 * 60 * 24 * 365 * 10
-  });
-
-  // Zeitreihe pro Wallet
-  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify({
-    id: it.id, mint: it.mint, sig: it.sig, ts: it.ts
-  }), { expirationTtl: 60 * 60 * 24 * 365 * 10 });
-
-  // Zähler
-  const cur = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
-  await env.CLAIMS.put(KEY_MINT_COUNT, String(cur + 1));
-}
-
-  // Kompakter Zeiteintrag pro Wallet (für schnelle "by-wallet"-Listen)
-  const compact = { id: it.id, mint: it.mint, sig: it.sig, ts: it.ts, collection: it.collection, name: it.name, uri: it.uri };
-  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify(compact), {
-    expirationTtl: 60 * 60 * 24 * 365 * 10
-  });
-
-  const cur = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
-  await env.CLAIMS.put(KEY_MINT_COUNT, String(cur + 1));
-}
-
-async function getMintById(env: Env, id: number): Promise<MintItem | null> {
-  const v = await env.CLAIMS.get(PFX_MINT_ID + id);
-  return v ? JSON.parse(v) as MintItem : null;
-}
-
-async function listByWallet(env: Env, wallet: string, limit = 10, cursor?: string) {
-  const res = await env.CLAIMS.list({ prefix: `${PFX_WAL}${wallet}:`, limit: Math.min(Math.max(limit, 1), 1000), cursor });
-  const items: Array<{ id: number; mint: string; sig: string; ts: number; collection?: string; name?: string; uri?: string }> = [];
-  for (const k of res.keys) {
-    const v = await env.CLAIMS.get(k.name);
-    if (!v) continue;
-    items.push(JSON.parse(v));
+  if (method === "POST" && pathname === "/mints") {
+    const j = await req.json().catch(() => null);
+    if (!j || typeof j !== "object") return new Response('{"ok":false}', { status: 400 });
+    const row: MintRow = {
+      id: Number(j.id),
+      mint: String(j.mint),
+      wallet: j.wallet ? String(j.wallet) : undefined,
+      sig: String(j.sig),
+      ts: Date.now(),
+      collection: j.collection ? String(j.collection) : undefined,
+      name: j.name ? String(j.name) : undefined,
+      uri: j.uri ? String(j.uri) : undefined
+    };
+    const keyById = `mints:id:${row.id}`;
+    const keyWalletIdx = row.wallet ? `mints:wallet:${row.wallet}:${row.ts}:${row.sig}` : "";
+    await env.CLAIMS.put(keyById, JSON.stringify(row));
+    if (keyWalletIdx) await env.CLAIMS.put(keyWalletIdx, JSON.stringify(row));
+    const keyFeed = `mints:feed:${row.ts}:${row.sig}`;
+    await env.CLAIMS.put(keyFeed, JSON.stringify(row));
+    return new Response(JSON.stringify({ ok: true, item: row }), { headers: { "content-type":"application/json" } });
   }
-  items.sort((a, b) => b.ts - a.ts);
-  return { items, cursor: res.cursor || null, list_complete: res.list_complete === true };
-}
 
-async function listMintsRecent(env: Env, limit = 50, cursor?: string) {
-  const page = await env.CLAIMS.list({ prefix: PFX_MINT_ID, limit: Math.min(Math.max(limit, 1), 1000), cursor });
-  const items: MintItem[] = [];
-  for (const k of page.keys) {
-    const v = await env.CLAIMS.get(k.name);
-    if (v) items.push(JSON.parse(v));
+  if (method === "GET" && pathname === "/mints/by-id") {
+    const id = Number(url.searchParams.get("id") || "-1");
+    const key = `mints:id:${id}`;
+    const v = await env.CLAIMS.get(key);
+    return new Response(JSON.stringify({ item: v ? JSON.parse(v) : null }), { headers: { "content-type":"application/json" } });
   }
-  items.sort((a, b) => (b.ts || 0) - (a.ts || 0));
-  return { items, cursor: page.cursor || null, list_complete: page.list_complete === true };
+
+  if (method === "GET" && pathname === "/mints/by-wallet") {
+    const wallet = String(url.searchParams.get("wallet") || "");
+    const limit = Number(url.searchParams.get("limit") || "10");
+    if (!wallet) return new Response(JSON.stringify({ items: [], list_complete: true }), { headers: { "content-type":"application/json" } });
+    // KV list prefix
+    const prefix = `mints:wallet:${wallet}:`;
+    const list = await env.CLAIMS.list({ prefix, limit });
+    const items: MintRow[] = [];
+    for (const k of list.keys) {
+      const v = await env.CLAIMS.get(k.name);
+      if (v) items.push(JSON.parse(v));
+    }
+    // Neueste zuerst
+    items.sort((a,b)=>b.ts - a.ts);
+    return new Response(JSON.stringify({ items, cursor: null, list_complete: true }), { headers: { "content-type":"application/json" } });
+  }
+
+  if (method === "GET" && pathname === "/mints") {
+    const limit = Number(url.searchParams.get("limit") || "10");
+    const prefix = `mints:feed:`;
+    const list = await env.CLAIMS.list({ prefix, limit });
+    const items: MintRow[] = [];
+    for (const k of list.keys) {
+      const v = await env.CLAIMS.get(k.name);
+      if (v) items.push(JSON.parse(v));
+    }
+    items.sort((a,b)=>b.ts - a.ts);
+    return new Response(JSON.stringify({ items, cursor: null, list_complete: true }), { headers: { "content-type":"application/json" } });
+  }
+
+  if (method === "GET" && pathname === "/mints/count") {
+    const list = await env.CLAIMS.list({ prefix: "mints:feed:" });
+    return new Response(JSON.stringify({ count: list.keys.length }), { headers: { "content-type":"application/json" } });
+  }
+
+  return new Response("not found", { status: 404 });
 }
 
-/* ========================= Worker ========================= */
+// ---------- /claims (GET, POST) ----------
+async function handleClaims(req: Request, env: Env, url: URL): Promise<Response> {
+  if (req.method === "GET") {
+    const list = await env.CLAIMS.list({ prefix: "claim:" });
+    const out: number[] = [];
+    for (const k of list.keys) {
+      const id = Number(k.name.split(":")[1] || "-1");
+      if (id >= 0) out.push(id);
+    }
+    out.sort((a,b)=>a-b);
+    return new Response(JSON.stringify({ claimed: out }), { headers: { "content-type":"application/json" } });
+  }
+  if (req.method === "POST") {
+    const j = await req.json().catch(()=>null);
+    const i = Number(j?.index ?? -1);
+    if (!Number.isInteger(i) || i < 0) return new Response("bad index", { status: 400 });
+    const key = `claim:${i}`;
+    const existed = await env.CLAIMS.get(key);
+    if (existed) return new Response(null, { status: 409 });
+    await env.CLAIMS.put(key, "1");
+    return new Response(null, { status: 200 });
+  }
+  return new Response("not found", { status: 404 });
+}
+
+// ---------- RPC passthrough ----------
+async function handleRpc(req: Request, env: Env): Promise<Response> {
+  const body = await req.text();
+  for (const target of [env.UPSTREAM_RPC, env.BACKUP_RPC]) {
+    try {
+      const r = await fetch(target, {
+        method: "POST",
+        headers: { "content-type":"application/json" },
+        body
+      });
+      if (r.ok) return new Response(r.body, { headers: r.headers });
+    } catch {}
+  }
+  return new Response(JSON.stringify({ error: "rpc unavailable" }), { status: 502, headers: { "content-type":"application/json" } });
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    const allow = parseList(env.ALLOWED_ORIGINS) || [];
-    const origin = pickOrigin(req, allow);
+    const { preflight, wrap } = cors(env);
 
-    // CORS helpers (ALLOWED_HEADERS aus ENV respektieren)
-    const cors = (ctype = 'application/json', extra?: Record<string, string>) => {
-      const h = baseCorsHeaders(origin, ctype, extra);
-      if (env.ALLOWED_HEADERS) h['Access-Control-Allow-Headers'] = env.ALLOWED_HEADERS;
-      return h;
-    };
-    const json = (data: unknown, status = 200, extraHdr?: Record<string, string>) =>
-      new Response(JSON.stringify(data), { status, headers: cors('application/json', extraHdr) });
-    const text = (msg: string, status = 200, extraHdr?: Record<string, string>) =>
-      new Response(msg, { status, headers: cors('text/plain', extraHdr) });
+    const pf = preflight(req);
+    if (pf) return pf;
 
-    // Preflight
-    if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors() });
-
-    /* -------- Health/Config -------- */
-    if (url.pathname === '/' || url.pathname === '/health') return text('OK: inpi-proxy-nft');
-    if (url.pathname === '/config') {
-      return json({
-        upstream: env.UPSTREAM_RPC,
-        backup: env.BACKUP_RPC || null,
-        allowed_origins: env.ALLOWED_ORIGINS || '',
-        creator: env.CREATOR_PUBKEY || null,
-        max_index: Number(env.MAX_INDEX || '9999'),
-      });
+    if (url.pathname.startsWith("/vendor/")) {
+      return wrap(await handleVendor(url.pathname, env), req);
     }
-    if (url.pathname === '/debug') {
-      return json({ now: Date.now(), blockhash_cache: { value: _lastBlockhash, age_ms: Date.now() - _lastBlockTs } });
+    if (url.pathname === "/mints" || url.pathname.startsWith("/mints/")) {
+      return wrap(await handleMints(req, env, url), req);
     }
-
-    /* -------- Vendor: mpl-token-metadata -------- */
-    if (url.pathname === '/vendor/mpl-token-metadata-umd.js') {
-      const candidates = [
-        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.js',
-        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
-        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/dist/index.umd.min.js',
-        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
-        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.4.0/umd/index.js',
-        // Fallback 3.3.x
-        'https://cdn.jsdelivr.net/npm/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
-        'https://unpkg.com/@metaplex-foundation/mpl-token-metadata@3.3.0/dist/index.umd.js',
-      ];
-      return serveVendorFromKV(env, 'mpl-token-metadata-umd.js', candidates, origin);
+    if (url.pathname === "/claims") {
+      return wrap(await handleClaims(req, env, url), req);
     }
-
-    /* -------- Vendor: web3.js (IIFE) -------- */
-    if (url.pathname === '/vendor/web3js.js') {
-      const candidates = [
-        'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.min.js',
-        'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js',
-        'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.95.3/lib/index.iife.js',
-        'https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.js',
-      ];
-      return serveVendorFromKV(env, 'web3.iife.js', candidates, origin);
+    if (url.pathname === "/rpc") {
+      return wrap(await handleRpc(req, env), req);
     }
-
-    /* -------- Vendor: spl-token (IIFE/UMD) -------- */
-    if (url.pathname === '/vendor/spl-token.js') {
-      const candidates = [
-        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.min.js',
-        'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.min.js',
-        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/dist/index.iife.js',
-        'https://unpkg.com/@solana/spl-token@0.4.9/dist/index.iife.js',
-        // Fallbacks
-        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.3/dist/index.iife.min.js',
-        'https://unpkg.com/@solana/spl-token@0.4.3/dist/index.iife.min.js',
-        'https://cdn.jsdelivr.net/npm/@solana/spl-token@0.4.9/umd/index.min.js',
-        'https://unpkg.com/@solana/spl-token@0.4.9/umd/index.min.js',
-      ];
-      return serveVendorFromKV(env, 'spl-token.iife.js', candidates, origin);
-    }
-
-    /* -------- JSON-RPC proxy -------- */
-    if (url.pathname === '/rpc' && req.method === 'POST') {
-      let body: any;
-      try { body = await readJsonSafe(req); } catch { return text('Bad JSON or too large', 400); }
-      const resp = await rpcForward(env, body);
-      const data = await resp.text();
-      return new Response(data, { status: resp.status, headers: cors('application/json') });
-    }
-
-    /* -------- latest-blockhash -------- */
-    if (url.pathname === '/latest-blockhash' && req.method === 'GET') {
-      try { return json({ blockhash: await getLatestBlockhash(env) }); }
-      catch (e: any) { return json({ error: String(e?.message || e) }, 502); }
-    }
-
-    /* -------- simulate (optional, nützlich fürs Debuggen) -------- */
-    if (url.pathname === '/simulate' && req.method === 'POST') {
-      type SimReq = { tx: string; sigVerify?: boolean; replaceRecentBlockhash?: boolean; };
-      let body: SimReq;
-      try { body = await readJsonSafe<SimReq>(req); } catch { return text('Bad JSON or too large', 400); }
-      if (!body?.tx) return text('Missing tx (base64)', 400);
-      const rpcBody = {
-        jsonrpc: '2.0', id: 1, method: 'simulateTransaction',
-        params: [body.tx, { sigVerify: !!body.sigVerify, replaceRecentBlockhash: body.replaceRecentBlockhash !== false, commitment: 'processed' }]
-      };
-      const r = await rpcForward(env, rpcBody);
-      const data = await r.text();
-      return new Response(data, { status: r.status, headers: cors('application/json') });
-    }
-
-    /* -------- relay (optional) -------- */
-    if (url.pathname === '/relay' && req.method === 'POST') {
-      type RelayReq = {
-        tx: string; skipPreflight?: boolean; maxRetries?: number;
-        preflightCommitment?: 'processed'|'confirmed'|'finalized';
-        confirm?: boolean; confirmCommitment?: 'processed'|'confirmed'|'finalized';
-        requireCreator?: boolean; signer?: string;
-      };
-      let body: RelayReq;
-      try { body = await readJsonSafe<RelayReq>(req); } catch { return text('Bad JSON or too large', 400); }
-      if (!body?.tx) return text('Missing tx (base64)', 400);
-
-      if (body.requireCreator) {
-        const need = (env.CREATOR_PUBKEY || '').trim();
-        const got  = (body.signer || '').trim();
-        if (!need) return text('CREATOR_PUBKEY not configured', 412);
-        if (!got || got !== need) return text('Forbidden: signer is not creator', 403);
-      }
-
-      const sendBody = {
-        jsonrpc: '2.0', id: 1, method: 'sendRawTransaction',
-        params: [ body.tx, { skipPreflight: !!body.skipPreflight, maxRetries: typeof body.maxRetries === 'number' ? body.maxRetries : undefined, preflightCommitment: body.preflightCommitment || 'processed' } ]
-      };
-      const sendResp = await rpcForward(env, sendBody);
-      const sendJson = await sendResp.json().catch(() => ({}));
-      if (!sendResp.ok || (sendJson as any)?.error) {
-        return json({ error: (sendJson as any)?.error || `sendRawTransaction failed ${sendResp.status}` }, 502);
-      }
-      const signature = (sendJson as any)?.result;
-
-      if (body.confirm) {
-        const bh = await getLatestBlockhash(env).catch(() => undefined);
-        const confBody = { jsonrpc: '2.0', id: 1, method: 'confirmTransaction', params: [ { signature, ...(bh ? { blockhash: bh } : {}) }, body.confirmCommitment || 'confirmed' ] };
-        const confResp = await rpcForward(env, confBody);
-        const confJson = await confResp.json().catch(() => ({}));
-        return json({ signature, confirm: (confJson as any)?.result ?? null });
-      }
-      return json({ signature });
-    }
-
-    /* -------- claims -------- */
-    if (url.pathname === '/claims') {
-      if (req.method === 'HEAD') return new Response(null, { status: 200, headers: cors() });
-      if (req.method === 'GET') {
-        const claimed = await getClaims(env);
-        const tag = `W/"c${claimed.length}-${claimed[0] ?? -1}-${claimed[claimed.length-1] ?? -1}"`;
-        return new Response(JSON.stringify({ claimed }), { status: 200, headers: cors('application/json', { ETag: tag }) });
-      }
-      if (req.method === 'POST') {
-        try {
-          const { index } = await readJsonSafe<{ index?: unknown }>(req);
-          if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return text('Invalid index', 400);
-          const res = await addClaim(env, index);
-          return res === 'exists' ? json({ error: 'already claimed' }, 409) : json({ ok: true });
-        } catch { return text('Bad JSON or too large', 400); }
-      }
-      return text('Method not allowed', 405);
-    }
-
-    if (url.pathname === '/claims/stats' && req.method === 'GET') {
-      const max = Number(env.MAX_INDEX || '9999');
-      const claimed = await getClaims(env);
-      const set = new Set<number>(claimed);
-      const freeCount = (max + 1) - set.size;
-      return json({ max_index: max, claimed_count: set.size, free_count: freeCount });
-    }
-
-    if (url.pathname === '/claims/free' && req.method === 'GET') {
-      const max = Number(env.MAX_INDEX || '9999');
-      const claimed = new Set<number>(await getClaims(env));
-      const free: number[] = [];
-      for (let i = 0; i <= max; i++) if (!claimed.has(i)) free.push(i);
-      return json({ free });
-    }
-
-    /* -------- Mint Registry -------- */
-    if (url.pathname === '/mints' && req.method === 'POST') {
-      type Body = { id?: unknown; mint?: unknown; wallet?: unknown; sig?: unknown; collection?: unknown; name?: unknown; uri?: unknown };
-      let body: Body;
-      try { body = await readJsonSafe<Body>(req); } catch { return text('Bad JSON or too large', 400); }
-
-      const id = Number(body.id);
-      const mint = String(body.mint || '').trim();
-      const wallet = String(body.wallet || '').trim();
-      const sig = String(body.sig || '').trim();
-      const collection = String((body.collection ?? '') as string).trim();
-      const name = String((body.name ?? '') as string).trim();
-      const uri = String((body.uri ?? '') as string).trim();
-
-      if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
-      if (!mint || !wallet || !sig) return json({ error: 'mint/wallet/sig required' }, 400);
-
-      const item: MintItem = { id, mint, wallet, sig, ts: Date.now(), collection, name, uri };
-      await putMint(env, item);
-      return json({ ok: true, item });
-    }
-
-    if (url.pathname === '/mints/by-id' && req.method === 'GET') {
-      const id = Number(url.searchParams.get('id') || '-1');
-      if (!Number.isInteger(id) || id < 0) return json({ error: 'invalid id' }, 400);
-      const item = await getMintById(env, id);
-      return item ? json({ item }) : json({ error: 'not found' }, 404);
-    }
-
-    if (url.pathname === '/mints/by-wallet' && req.method === 'GET') {
-      const wallet = String(url.searchParams.get('wallet') || '').trim();
-      const limit = Number(url.searchParams.get('limit') || '10');
-      const cursor = url.searchParams.get('cursor') || undefined;
-      if (!wallet) return json({ error: 'wallet required' }, 400);
-      const out = await listByWallet(env, wallet, limit, cursor);
-      return json(out);
-    }
-
-    if (url.pathname === '/mints' && req.method === 'GET') {
-      const limit = Number(url.searchParams.get('limit') || '50');
-      const cursor = url.searchParams.get('cursor') || undefined;
-      const out = await listMintsRecent(env, limit, cursor);
-      return json(out);
-    }
-
-    if (url.pathname === '/mints/count' && req.method === 'GET') {
-      const n = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
-      return json({ count: n });
-    }
-
-    // 404
-    return text('Not found', 404);
+    return new Response("ok");
   }
 } satisfies ExportedHandler<Env>;
