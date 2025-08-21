@@ -249,7 +249,7 @@ async function handleMints(req: Request, env: Env, url: URL): Promise<Response> 
 
 /* ------------------ /claims ------------------ */
 async function handleClaims(req: Request, env: Env, url: URL): Promise<Response> {
-  if (req.method === "GET") {
+    const { method, headers } = req;  if (req.method === "GET") {
     // ❶ NEU: Sammel-Key "claimed" direkt zurückgeben, wenn vorhanden
     const packed = await env.CLAIMS.get("claimed");
     if (packed) {
