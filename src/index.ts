@@ -174,15 +174,25 @@ type MintItem = {
   uri?: string;
 };
 
-const PFX_MINT_ID = 'mint:id:';         // genau 1 Datensatz je ID
-const PFX_WAL     = 'mint:wal:';        // Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
-const KEY_MINT_COUNT = 'mint_count';    // einfacher Zähler
+const PFX_MINT_ID   = 'mint:id:';      // 1 Datensatz je Token-ID
+const PFX_WAL       = 'mint:wal:';     // Zeitreihe pro Wallet: mint:wal:<wallet>:<ts>
+const KEY_MINT_COUNT = 'mint_count';   // Zähler
 
 async function putMint(env: Env, it: MintItem) {
-  // Voller Datensatz unter der ID
+  // Vollobjekt für Nachschlagen per ID
   await env.CLAIMS.put(PFX_MINT_ID + it.id, JSON.stringify(it), {
     expirationTtl: 60 * 60 * 24 * 365 * 10
   });
+
+  // Zeitreihe pro Wallet
+  await env.CLAIMS.put(`${PFX_WAL}${it.wallet}:${it.ts}`, JSON.stringify({
+    id: it.id, mint: it.mint, sig: it.sig, ts: it.ts
+  }), { expirationTtl: 60 * 60 * 24 * 365 * 10 });
+
+  // Zähler
+  const cur = Number((await env.CLAIMS.get(KEY_MINT_COUNT)) || '0');
+  await env.CLAIMS.put(KEY_MINT_COUNT, String(cur + 1));
+}
 
   // Kompakter Zeiteintrag pro Wallet (für schnelle "by-wallet"-Listen)
   const compact = { id: it.id, mint: it.mint, sig: it.sig, ts: it.ts, collection: it.collection, name: it.name, uri: it.uri };
