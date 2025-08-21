@@ -248,10 +248,37 @@ async function handleMints(req: Request, env: Env, url: URL): Promise<Response> 
 }
 
 /* ------------------ /claims ------------------ */
-async function handleClaims(req: Request, env: Env, _url: URL): Promise<Response> {
-  const { method, headers } = req;
+async function handleClaims(req: Request, env: Env, url: URL): Promise<Response> {
+  if (req.method === "GET") {
+    // ❶ NEU: Sammel-Key "claimed" direkt zurückgeben, wenn vorhanden
+    const packed = await env.CLAIMS.get("claimed");
+    if (packed) {
+      try {
+        // optional: simples Heilen eines versehentlichen Schluss-Kommas
+        const healed = packed.replace(/,\s*\]$/, "]");
+        const arr = JSON.parse(healed);
+        if (Array.isArray(arr)) {
+          const out = arr
+            .map(n => Number(n))
+            .filter(n => Number.isInteger(n) && n >= 0)
+            .sort((a,b)=>a-b);
 
-  if (method === "GET") {
+          const tag = `"c-${out.length}-${out[0] ?? 0}-${out[out.length-1] ?? 0}"`;
+          if (req.headers.get("If-None-Match") === tag) {
+            return new Response(null, { status: 304 });
+          }
+          return new Response(JSON.stringify(out), {
+            status: 200,
+            headers: {
+              "content-type":"application/json; charset=utf-8",
+              "ETag": tag
+            }
+          });
+        }
+      } catch { /* fällt auf die alte Logik zurück */ }
+    }
+
+    // ❷ ALT: aus einzelnen Keys claim:<i> zusammensetzen
     const out: number[] = [];
     let cursor: string | undefined = undefined;
     do {
@@ -265,7 +292,7 @@ async function handleClaims(req: Request, env: Env, _url: URL): Promise<Response
     out.sort((a, b) => a - b);
 
     const tag = `"c-${out.length}-${out[0] ?? 0}-${out[out.length-1] ?? 0}"`;
-    if (headers.get("If-None-Match") === tag) return new Response(null, { status: 304 });
+    if (req.headers.get("If-None-Match") === tag) return new Response(null, { status: 304 });
     return new Response(JSON.stringify(out), {
       status: 200,
       headers: { "content-type":"application/json; charset=utf-8", "ETag": tag }
